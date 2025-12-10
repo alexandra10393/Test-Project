@@ -15,13 +15,12 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 OCR_KEY = os.environ.get("OCR_KEY", "")
 
 def get_clean_id(url):
-    """Estrae l'ID univoco o il nome file dal link sporco"""
-    # Esempio: https://cdn.../immagine.jpg?token=123 -> immagine.jpg
+    """Estrae l'ID univoco dal parametro filename"""
+    # Esempio: ...&filename=12345_n.jpg -> 12345_n.jpg
     try:
-        # Prende l'ultima parte dopo lo slash e rimuove tutto dopo il ?
-        filename = url.split("/")[-1].split("?")[0]
-        # Rimuove eventuali caratteri strani rimasti
-        return filename.strip()
+        if "filename=" in url:
+            return url.split("filename=")[1].split("&")[0]
+        return url.split("/")[-1].split("?")[0]
     except:
         return url
 
@@ -35,11 +34,9 @@ def send_telegram(text, media_url=None, is_video=False):
         try:
             payload = {"chat_id": CHAT_ID, "caption": text, "parse_mode": "HTML"}
             files_key = 'video' if is_video else 'photo'
-            # Timeout aumentato per video pesanti
             requests.post(api_url + method, data=payload, params={files_key: media_url}, timeout=60)
         except Exception as e:
             print(f"Errore invio media: {e}")
-            # Fallback: manda solo il link
             requests.post(api_url + "sendMessage", json={"chat_id": CHAT_ID, "text": text + f"\n\n(Link: {media_url})"})
     else:
         requests.post(api_url + "sendMessage", json={"chat_id": CHAT_ID, "text": text})
@@ -71,7 +68,6 @@ def run():
                 time.sleep(2)
             except: pass
 
-            # Scroll
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             time.sleep(5)
 
@@ -84,10 +80,9 @@ def run():
         content = page.content()
         found_links = re.findall(r'https://cdn\.iqsaved\.com/[^"\']+', content)
         found_links = [l.replace('&amp;', '&') for l in found_links]
-        found_links = list(dict.fromkeys(found_links)) # Rimuove duplicati immediati
+        found_links = list(dict.fromkeys(found_links))
 
-        # --- GESTIONE MEMORIA PIÙ ROBUSTA ---
-        # Leggiamo history.txt (che conterrà solo i NOMI FILE puliti, non i link interi)
+        # --- MEMORIA ---
         seen_ids = []
         if os.path.exists("history.txt"):
             with open("history.txt", "r") as f:
@@ -96,16 +91,18 @@ def run():
         new_ids_to_save = []
         
         for url in found_links:
-            # Calcoliamo l'ID pulito di questa storia
+            # --- FILTRO ANT-PROFILO ---
+            # Se non c'è "filename=", al 99% è la foto profilo o sporcizia -> SALTA
+            if "filename=" not in url:
+                continue
+
             clean_id = get_clean_id(url)
             
-            # Se l'abbiamo già visto, saltiamo
             if clean_id in seen_ids:
                 continue
             
-            # Se è nuovo:
             tipo = "VIDEO" if ".mp4" in url or "video" in url else "FOTO"
-            print(f"NUOVA STORIA TROVATA: {clean_id}")
+            print(f"NUOVA STORIA: {clean_id}")
             
             dida = "Storia"
             if tipo == "FOTO" and OCR_KEY:
@@ -117,18 +114,14 @@ def run():
             
             send_telegram(dida, url, tipo == "VIDEO")
             
-            # Aggiungiamo alla lista da salvare
             new_ids_to_save.append(clean_id)
-            seen_ids.append(clean_id) # Aggiungiamo alla memoria locale temporanea per evitare loop
-            
+            seen_ids.append(clean_id)
             time.sleep(3)
 
         browser.close()
 
-        # --- SALVATAGGIO FINALE ---
-        # Salviamo solo se c'è qualcosa di nuovo
+        # --- SALVATAGGIO ---
         if new_ids_to_save:
-            print(f"Salvataggio di {len(new_ids_to_save)} nuove storie...")
             with open("history.txt", "a") as f:
                 for sid in new_ids_to_save:
                     f.write(f"{sid}\n")
