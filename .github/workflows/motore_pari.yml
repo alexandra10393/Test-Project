@@ -2,7 +2,7 @@ name: Motore A (Pari)
 
 on:
   schedule:
-    - cron: '0,10,20,30,40,50 * * * *'
+    - cron: '0,10,20,30,40,50 7-23,0-1 * * *'
   workflow_dispatch:
 
 permissions:
