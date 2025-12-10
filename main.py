@@ -9,7 +9,7 @@ IG_USER = "gabrieleparpiglia"
 TARGET_URL = f"https://iqsaved.com/it/viewer/{IG_USER}/"
 PAROLE_CHIAVE = ["DE MARTINO", "BELEN", "STEFANO"]
 
-# RECUPERO CHIAVI (DA GITHUB SECRETS)
+# RECUPERO CHIAVI DA GITHUB
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 OCR_KEY = os.environ.get("OCR_KEY", "")
@@ -24,55 +24,46 @@ def send_telegram(text, media_url=None, is_video=False):
         try:
             payload = {"chat_id": CHAT_ID, "caption": text, "parse_mode": "HTML"}
             files_key = 'video' if is_video else 'photo'
-            # Usiamo una richiesta POST con dati
-            requests.post(api_url + method, data=payload, params={files_key: media_url}, timeout=30)
+            requests.post(api_url + method, data=payload, params={files_key: media_url}, timeout=60)
         except Exception as e:
             print(f"Errore invio media: {e}")
-            # Fallback: manda solo il link se il media fallisce
-            requests.post(api_url + "sendMessage", json={"chat_id": CHAT_ID, "text": text + f"\n\n(Media non caricato, link: {media_url})"})
+            requests.post(api_url + "sendMessage", json={"chat_id": CHAT_ID, "text": text + f"\n\n(Link: {media_url})"})
     else:
         requests.post(api_url + "sendMessage", json={"chat_id": CHAT_ID, "text": text})
 
 def ocr_scan(image_url):
     if not OCR_KEY: return ""
-    print("Eseguo OCR sulla foto...")
+    print("Analisi OCR in corso...")
     try:
         url = f"https://api.ocr.space/parse/imageurl?apikey={OCR_KEY}&url={image_url}&language=ita&isOverlayRequired=false"
         r = requests.get(url, timeout=15).json()
         if r.get("ParsedResults"):
-            testo_trovato = r["ParsedResults"][0]["ParsedText"].upper()
-            print(f"Testo OCR trovato: {testo_trovato[:50]}...")
-            return testo_trovato
-    except Exception as e:
-        print(f"Errore OCR: {e}")
+            return r["ParsedResults"][0]["ParsedText"].upper()
+    except:
+        pass
     return ""
 
 def run():
-    print("Avvio browser Playwright...")
+    print("Avvio Browser (Playwright)...")
     with sync_playwright() as p:
-        # Lanciamo chromium (simile a Chrome/Brave)
+        # Avvia Chromium in modalità headless (invisibile)
         browser = p.chromium.launch(headless=True)
-        # Usiamo uno UserAgent reale per sembrare un PC vero
         context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         page = context.new_page()
         
         try:
-            print(f"Vado su {TARGET_URL}")
             page.goto(TARGET_URL, timeout=90000, wait_until="domcontentloaded")
-            
-            # --- BYPASS BANNER COOKIE (La tecnica imparata oggi) ---
-            print("Attendo caricamento pagina (10s)...")
-            time.sleep(10) 
-            
-            try:
-                # Cerca e clicca bottoni comuni di consenso
-                page.click("button.fc-cta-consent, button.primary-button, .cookie-agree", timeout=5000)
-                print("Banner Cookie cliccato!")
-                time.sleep(3)
-            except:
-                print("Nessun banner trovato o già accettato.")
+            time.sleep(8) # Attesa caricamento iniziale
 
-            # Scorriamo la pagina per attivare il caricamento delle storie
+            # --- BYPASS BANNER COOKIE ---
+            try:
+                page.click("button.fc-cta-consent, button.primary-button, .cookie-agree", timeout=4000)
+                print("Cookie accettati.")
+                time.sleep(2)
+            except:
+                print("Banner non trovato o non necessario.")
+
+            # Scroll per forzare il caricamento delle storie
             page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
             time.sleep(5)
 
@@ -82,19 +73,18 @@ def run():
             return
 
         # --- ESTRAZIONE LINK ---
-        # Cerchiamo direttamente i link 'cdn.iqsaved.com' nel codice, come fatto col PowerShell
+        # Cerchiamo i link diretti ai file media nel codice HTML renderizzato
         content = page.content()
-        # Regex per trovare i link lunghi delle immagini/video
         found_links = re.findall(r'https://cdn\.iqsaved\.com/[^"\']+', content)
         
-        # Pulizia link (rimuovi eventuali escape HTML)
+        # Pulizia link
         found_links = [l.replace('&amp;', '&') for l in found_links]
-        # Rimuoviamo duplicati mantenendo l'ordine
+        # Rimuove duplicati mantenendo l'ordine
         found_links = list(dict.fromkeys(found_links))
 
-        print(f"Trovati {len(found_links)} link potenziali.")
+        print(f"Trovati {len(found_links)} contenuti totali.")
 
-        # --- GESTIONE MEMORIA (HISTORY.TXT) ---
+        # --- GESTIONE MEMORIA ---
         seen_stories = []
         if os.path.exists("history.txt"):
             with open("history.txt", "r") as f:
@@ -103,41 +93,33 @@ def run():
         new_ids = []
         
         for url in found_links:
-            # Controllo se l'abbiamo già mandato
             if url in seen_stories:
                 continue
             
-            # Determina se è VIDEO o FOTO guardando l'URL o il filename
             tipo = "VIDEO" if ".mp4" in url or "video" in url else "FOTO"
+            print(f"Nuovo contenuto: {tipo}")
             
-            print(f"Nuova storia trovata: {tipo}")
+            # --- LOGICA DEL MESSAGGIO RICHIESTA ---
+            dida = "Storia"
             
-            dida = f"Nuova storia di {IG_USER}"
-            
-            # --- LOGICA OCR e PAROLE CHIAVE ---
             if tipo == "FOTO" and OCR_KEY:
                 txt = ocr_scan(url)
-                trovato_key = False
                 for k in PAROLE_CHIAVE:
                     if k in txt: 
-                        dida = f"🚨 <b>ALLARME GOSSIP: {k.title()}!</b>\n\nTrovato nella storia di {IG_USER}!"
-                        trovato_key = True
+                        dida = f"Storia su {k.title()}"
                         break
-                if not trovato_key and txt:
-                    dida += f"\n\nTesto rilevato: <i>{txt[:100]}...</i>"
             
-            # Invio
             send_telegram(dida, url, tipo == "VIDEO")
             new_ids.append(url)
-            time.sleep(5) # Pausa anti-ban tra un invio e l'altro
+            time.sleep(3) # Pausa di cortesia tra i messaggi
 
-        # --- SALVATAGGIO MEMORIA ---
+        # Aggiornamento memoria
         if new_ids:
             with open("history.txt", "a") as f:
                 for sid in new_ids: f.write(f"{sid}\n")
-            print(f"Salvate {len(new_ids)} nuove storie in history.txt")
+            print(f"Salvate {len(new_ids)} nuove storie.")
         else:
-            print("Nessuna novità.")
+            print("Nessuna nuova storia.")
 
         browser.close()
 
