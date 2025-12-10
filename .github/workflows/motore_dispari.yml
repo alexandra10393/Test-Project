@@ -1,0 +1,30 @@
+name: Motore B (Dispari)
+
+on:
+  schedule:
+    - cron: '5,15,25,35,45,55 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-tracker:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+    - run: |
+        pip install requests playwright
+        playwright install chromium
+    - env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        OCR_KEY: ${{ secrets.OCR_KEY }}
+      run: python main.py
+    - uses: stefanzweifel/git-auto-commit-action@v4
+      with:
+        commit_message: "Motore B: Aggiornamento"
+        file_pattern: history.txt
