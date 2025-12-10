@@ -2,7 +2,9 @@ name: Motore A (Pari)
 
 on:
   schedule:
-    - cron: '0,10,20,30,40,50 7-23,0-1 * * *'
+    # Ore UTC: 7-23 (08:00-24:00 IT) e 0-0 (01:00 IT)
+    # Copre fino all'1:50 UTC (2:50 IT), poi si ferma fino alle 8:00 IT
+    - cron: '0,10,20,30,40,50 7-23,0 * * *'
   workflow_dispatch:
 
 permissions:
