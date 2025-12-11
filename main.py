@@ -55,7 +55,7 @@ def ocr_scan(image_url):
     except: pass
     return ""
 
-# --- MOTORE 1: STORYSAVER.NET (Motore Primario - FINAL FIX) ---
+# --- MOTORE 1: STORYSAVER.NET (Motore Primario - FINALISSIMA) ---
 def check_storysaver(page):
     print(f"🔎 Controllo STORYSAVER.NET per {IG_USER}...")
     links = []
@@ -77,9 +77,8 @@ def check_storysaver(page):
             search_input.wait_for(state="visible", timeout=10000)
             search_input.fill(IG_USER)
             
-            # AGGIORNAMENTO CRITICO: Pulsante "scarica!"
-            # Cerchiamo il pulsante con il testo esatto "scarica!"
-            search_button = page.locator("button:has-text('scarica!'), button[type='submit'], button.btn-danger").first
+            # AGGIORNAMENTO CRITICO: INCLUDIAMO ANCHE IL TAG LINK (<a>)
+            search_button = page.locator("button:has-text('scarica!'), a:has-text('scarica!'), button[type='submit'], button.btn-danger").first
             search_button.wait_for(state="visible", timeout=10000)
             search_button.click()
             
@@ -91,7 +90,6 @@ def check_storysaver(page):
         
         # 3. Cloudflare Check / Caricamento Risultati (Attesa prolungata)
         try:
-            # Attendiamo che appaiano i risultati (ad es. il numero di storie o il tasto Save as Photo)
             page.wait_for_selector("a:has-text('Save as Photo'), div:has-text('storie totali')", timeout=25000)
             print("✅ Contenuto caricato (Cloudflare risolto o bypassato).")
             time.sleep(5) 
