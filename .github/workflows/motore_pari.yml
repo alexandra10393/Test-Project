@@ -2,8 +2,6 @@ name: Motore A (Pari)
 
 on:
   schedule:
-    # Ore UTC: 7-23 (08:00-24:00 IT) e 0-0 (01:00 IT)
-    # Copre fino all'1:50 UTC (2:50 IT), poi si ferma fino alle 8:00 IT
     - cron: '0,10,20,30,40,50 7-23,0 * * *'
   workflow_dispatch:
 
@@ -15,17 +13,43 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
+
+    # --- PUNTO 4: CACHE INTELLIGENTE ---
+    - name: Cache Playwright Browsers
+      uses: actions/cache@v3
+      id: playwright-cache
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ runner.os }}-playwright
+
     - uses: actions/setup-python@v4
       with:
         python-version: '3.9'
-    - run: |
+        cache: 'pip' # Cache automatica delle librerie Python
+
+    - name: Installazione Dipendenze
+      run: |
         pip install requests playwright
+        # Installa il browser solo se non è stato trovato nella cache
         playwright install chromium
-    - env:
+
+    - name: Esecuzione Bot
+      env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         OCR_KEY: ${{ secrets.OCR_KEY }}
       run: python main.py
+
+    # --- PUNTO 6: UPLOAD SCREENSHOT (Se esiste) ---
+    - name: Upload Screenshot Errore
+      if: always() # Esegui questo passaggio anche se lo script fallisce
+      uses: actions/upload-artifact@v4
+      with:
+        name: debug-screenshot
+        path: error_screenshot.png
+        if-no-files-found: ignore # Se va tutto bene e non c'è foto, ignora e prosegui
+        retention-days: 1 # Tieni la foto solo 1 giorno per risparmiare spazio
+
     - uses: stefanzweifel/git-auto-commit-action@v4
       with:
         commit_message: "Motore A: Aggiornamento"
