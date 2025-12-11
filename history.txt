@@ -151,3 +151,10 @@ img2.php
 img2.php
 img2.php
 img2.php
+download-photo
+download-igtv
+download-instagram-reels
+download-profile-photo
+download-video
+download-story
+download-highlights
