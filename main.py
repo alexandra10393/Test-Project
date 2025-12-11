@@ -55,7 +55,7 @@ def ocr_scan(image_url):
     except: pass
     return ""
 
-# --- MOTORE 1: MOLLYGRAM (Super-Aggiornato) ---
+# --- MOTORE 1: MOLLYGRAM (Con Filtro Anti-Spam) ---
 def check_mollygram(page):
     print(f"🔎 Controllo MOLLYGRAM per {IG_USER}...")
     links = []
@@ -72,7 +72,6 @@ def check_mollygram(page):
 
         # 2. Ricerca
         try:
-            # Cerca la barra e scrivi
             search_input = page.locator('input[name="url"], input[type="text"]').first
             search_input.wait_for(state="visible", timeout=10000)
             search_input.click()
@@ -81,33 +80,51 @@ def check_mollygram(page):
             search_input.press('Enter')
             print("⌨️ Ricerca inviata...")
             
-            # ATTESA CRUCIALE: Aspettiamo che appaia almeno un tasto "Download"
-            # Questo assicura che la pagina abbia caricato i risultati prima di leggere
+            # Aspettiamo i risultati veri (non la pubblicità)
             try:
-                page.wait_for_selector('a:has-text("Download"), a:has-text("Salva")', timeout=20000)
-                print("✨ Risultati caricati!")
-            except:
-                print("⚠️ Tempo attesa scaduto (forse nessun risultato o caricamento lento)")
+                # Cerchiamo elementi che sembrano storie (hanno spesso classe 'item' o simili)
+                # O aspettiamo semplicemente un po' di più che la pagina carichi i media esterni
+                time.sleep(10)
+                print("✨ Tempo caricamento terminato.")
+            except: pass
 
         except Exception as e:
             print(f"⚠️ Errore ricerca: {e}")
             return []
 
-        # 3. Estrazione "A strascico"
-        # Cerchiamo: 
-        # A) Link che contengono 'anon-viewer' (quello che hai notato tu)
-        # B) Link che contengono testo 'Download'
-        # C) Link classici mp4/jpg
-        found_elements = page.query_selector_all('a[href*="anon-viewer"], a:has-text("Download"), a[href*=".mp4"], a[href*=".jpg"]')
+        # 3. Estrazione CHIRURGICA
+        # Prendiamo TUTTI i link, ma poi li filtriamo pesantemente
+        all_links = page.query_selector_all('a')
         
-        for el in found_elements:
-            link = el.get_attribute("href")
-            # Filtro base per evitare link vuoti o javascript
-            if link and "http" in link:
-                links.append(link)
+        print(f"Dati grezzi trovati: {len(all_links)} elementi.")
+        
+        for el in all_links:
+            url = el.get_attribute("href")
+            
+            if not url or "http" not in url:
+                continue
+
+            # --- FILTRO ANTI-SPAM (Il cuore della modifica) ---
+            
+            # 1. Deve contenere il dominio che hai scoperto tu (o estensioni video)
+            is_valid = False
+            if "anon-viewer" in url: is_valid = True
+            if ".mp4" in url: is_valid = True
+            if "cdninstagram" in url: is_valid = True  # A volte usano questo
+            
+            # 2. NON deve contenere parole "spazzatura"
+            bad_words = ["google", "adservice", "banner", "signup", "login", "logo", "assets", "reels"]
+            if any(bad in url.lower() for bad in bad_words):
+                is_valid = False
+
+            # Se supera i test, lo aggiungiamo
+            if is_valid:
+                # Piccolo fix: a volte i link hanno parametri extra sporchi, li puliamo
+                clean_link = url.split("?")[0] + "?" + url.split("?")[1] if "?" in url else url
+                links.append(clean_link)
 
         links = list(dict.fromkeys(links))
-        print(f"✅ Mollygram: trovati {len(links)} link potenziali.")
+        print(f"✅ Mollygram PULITO: trovati {len(links)} link validi (Spam scartato).")
         return links
 
     except Exception as e:
