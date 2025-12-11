@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 # Usa le variabili d'ambiente (Secrets) se ci sono, altrimenti i valori di default
 IG_USER = os.environ.get("IG_USER", "gabrieleparpiglia") 
 PAROLE_CHIAVE = ["DE MARTINO", "BELEN", "STEFANO DE MARTINO"]
-SOGLIA_ALLUVIONE = 50   
+SOGLIA_ALLUVIONE = 150   
 MAX_HISTORY = 300      
 
 # RECUPERO CHIAVI
@@ -55,53 +55,58 @@ def ocr_scan(image_url):
     except: pass
     return ""
 
-# --- MOTORE 1: MOLLYGRAM (Prioritario) ---
+# --- MOTORE 1: MOLLYGRAM (Aggiornato) ---
 def check_mollygram(page):
     print(f"🔎 Controllo MOLLYGRAM per {IG_USER}...")
     links = []
     try:
+        # Caricamento con un wait più intelligente
         page.goto("https://mollygram.com/it", timeout=60000)
-        time.sleep(5)
-
-        # 1. Gestione Cookie/Consent
+        
+        # 1. Gestione Cookie (Proviamo più selettori)
         try:
-            page.click("text=Consent", timeout=3000)
+            page.wait_for_selector("text=Consent, .fc-cta-consent", timeout=5000)
+            page.click("text=Consent, .fc-cta-consent")
             print("🍪 Cookie accettati.")
-            time.sleep(1)
-        except: pass
+            time.sleep(2)
+        except: 
+            print("ℹ️ Nessun banner cookie trovato o già accettato.")
 
-        # 2. Ricerca Utente
+        # 2. Ricerca Utente (Versione Robusta)
         try:
-            # Scrive l'utente nella barra di ricerca
-            page.fill('input[name="url"]', IG_USER)
-            page.press('input[name="url"]', 'Enter')
+            # Cerchiamo la barra in modo generico (il primo input di testo visibile)
+            search_input = page.locator('input[name="url"], input[type="text"], input.form-control').first
+            
+            # Ci assicuriamo che sia visibile e cliccabile
+            search_input.wait_for(state="visible", timeout=10000)
+            search_input.click()
+            search_input.fill(IG_USER)
+            search_input.press('Enter')
+            
             print("⌨️ Utente cercato, attendo risultati...")
             
-            # Aspetta che carichi (cerca un elemento che appare dopo la ricerca)
-            # A volte apre una nuova pagina o aggiorna quella attuale
-            time.sleep(8) 
+            # Aspettiamo che appaia qualcosa che assomiglia a un risultato (avatar o media)
+            # Aumentiamo l'attesa perché Mollygram a volte è lento a processare
+            time.sleep(10) 
+            
         except Exception as e:
-            print(f"⚠️ Errore ricerca Mollygram: {e}")
+            print(f"⚠️ Errore ricerca Mollygram (Barra non trovata): {e}")
+            # Se fallisce la ricerca, proviamo ad andare direttamente all'URL (tentativo disperato)
+            # Nota: Spesso non funziona su Mollygram, ma vale la pena tentare
             return []
 
-        # 3. Scroll verso il basso (le storie sono in fondo)
+        # 3. Scroll e Estrazione
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         time.sleep(3)
         
-        # 4. Estrazione Link "Download HD" o video/img diretti
-        # Cerchiamo i tasti che contengono i link
-        # Mollygram spesso usa tasti con scritto "Download" o "Download HD"
-        # Cerchiamo tutti i tag <a> che finiscono con .mp4 o .jpg o hanno classi specifiche
-        
-        # Metodo generico robusto per Mollygram:
-        found_elements = page.query_selector_all('a[href*=".mp4"], a[href*=".jpg"], a[href*=".jpeg"]')
+        # Cerchiamo i tasti download o i link diretti ai media
+        found_elements = page.query_selector_all('a[href*=".mp4"], a[href*=".jpg"], a[href*=".jpeg"], a[download]')
         
         for el in found_elements:
             link = el.get_attribute("href")
             if link and "http" in link:
                 links.append(link)
 
-        # Rimuove duplicati
         links = list(dict.fromkeys(links))
         print(f"✅ Mollygram: trovati {len(links)} link potenziali.")
         return links
