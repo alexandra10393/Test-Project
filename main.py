@@ -55,55 +55,54 @@ def ocr_scan(image_url):
     except: pass
     return ""
 
-# --- MOTORE 1: MOLLYGRAM (Aggiornato) ---
+# --- MOTORE 1: MOLLYGRAM (Super-Aggiornato) ---
 def check_mollygram(page):
     print(f"🔎 Controllo MOLLYGRAM per {IG_USER}...")
     links = []
     try:
-        # Caricamento con un wait più intelligente
         page.goto("https://mollygram.com/it", timeout=60000)
         
-        # 1. Gestione Cookie (Proviamo più selettori)
+        # 1. Cookie
         try:
             page.wait_for_selector("text=Consent, .fc-cta-consent", timeout=5000)
             page.click("text=Consent, .fc-cta-consent")
             print("🍪 Cookie accettati.")
-            time.sleep(2)
-        except: 
-            print("ℹ️ Nessun banner cookie trovato o già accettato.")
+            time.sleep(1)
+        except: pass
 
-        # 2. Ricerca Utente (Versione Robusta)
+        # 2. Ricerca
         try:
-            # Cerchiamo la barra in modo generico (il primo input di testo visibile)
-            search_input = page.locator('input[name="url"], input[type="text"], input.form-control').first
-            
-            # Ci assicuriamo che sia visibile e cliccabile
+            # Cerca la barra e scrivi
+            search_input = page.locator('input[name="url"], input[type="text"]').first
             search_input.wait_for(state="visible", timeout=10000)
             search_input.click()
             search_input.fill(IG_USER)
+            time.sleep(1)
             search_input.press('Enter')
+            print("⌨️ Ricerca inviata...")
             
-            print("⌨️ Utente cercato, attendo risultati...")
-            
-            # Aspettiamo che appaia qualcosa che assomiglia a un risultato (avatar o media)
-            # Aumentiamo l'attesa perché Mollygram a volte è lento a processare
-            time.sleep(10) 
-            
+            # ATTESA CRUCIALE: Aspettiamo che appaia almeno un tasto "Download"
+            # Questo assicura che la pagina abbia caricato i risultati prima di leggere
+            try:
+                page.wait_for_selector('a:has-text("Download"), a:has-text("Salva")', timeout=20000)
+                print("✨ Risultati caricati!")
+            except:
+                print("⚠️ Tempo attesa scaduto (forse nessun risultato o caricamento lento)")
+
         except Exception as e:
-            print(f"⚠️ Errore ricerca Mollygram (Barra non trovata): {e}")
-            # Se fallisce la ricerca, proviamo ad andare direttamente all'URL (tentativo disperato)
-            # Nota: Spesso non funziona su Mollygram, ma vale la pena tentare
+            print(f"⚠️ Errore ricerca: {e}")
             return []
 
-        # 3. Scroll e Estrazione
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        time.sleep(3)
-        
-        # Cerchiamo i tasti download o i link diretti ai media
-        found_elements = page.query_selector_all('a[href*=".mp4"], a[href*=".jpg"], a[href*=".jpeg"], a[download]')
+        # 3. Estrazione "A strascico"
+        # Cerchiamo: 
+        # A) Link che contengono 'anon-viewer' (quello che hai notato tu)
+        # B) Link che contengono testo 'Download'
+        # C) Link classici mp4/jpg
+        found_elements = page.query_selector_all('a[href*="anon-viewer"], a:has-text("Download"), a[href*=".mp4"], a[href*=".jpg"]')
         
         for el in found_elements:
             link = el.get_attribute("href")
+            # Filtro base per evitare link vuoti o javascript
             if link and "http" in link:
                 links.append(link)
 
