@@ -7,7 +7,7 @@ from playwright.sync_api import sync_playwright
 # --- CONFIGURAZIONE ---
 IG_USER = "gabrieleparpiglia"
 TARGET_URL = f"https://iqsaved.com/it/viewer/{IG_USER}/"
-PAROLE_CHIAVE = ["DE MARTINO", "BELEN", "STEFANO"]
+PAROLE_CHIAVE = ["DE MARTINO", "BELEN", "STEFANO DE MARTINO"]
 SOGLIA_ALLUVIONE = 5   # Se > 5 storie nuove, non inviare notifiche
 MAX_HISTORY = 200      # Mantiene solo gli ultimi 200 ID in memoria
 
@@ -97,6 +97,13 @@ def run():
 
         except Exception as e:
             print(f"Errore critico pagina: {e}")
+            # --- NUOVO: FOTO DEBUG ---
+            try:
+                page.screenshot(path="error_screenshot.png")
+                print("📸 Screenshot di errore salvato: error_screenshot.png")
+            except:
+                print("Impossibile salvare screenshot.")
+            # -------------------------
             browser.close()
             return
 
