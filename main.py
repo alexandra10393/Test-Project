@@ -55,7 +55,7 @@ def ocr_scan(image_url):
     except: pass
     return ""
 
-# --- MOTORE 1: MOLLYGRAM (Filtro Super-Sicuro) ---
+# --- MOTORE 1: MOLLYGRAM (Filtro Super-Sicuro e Mirato) ---
 def check_mollygram(page):
     print(f"🔎 Controllo MOLLYGRAM per {IG_USER}...")
     links = []
@@ -81,8 +81,8 @@ def check_mollygram(page):
             print("⌨️ Ricerca inviata...")
             
             try:
-                # Aspettiamo il caricamento dei risultati prima di estrarre
-                page.wait_for_selector('a:has-text("Download")', timeout=20000)
+                # ATTENZIONE: Aggiunto "DOWNLOAD HD" esplicito
+                page.wait_for_selector('a:has-text("Download"), a:has-text("Salva"), a:has-text("DOWNLOAD HD")', timeout=20000)
                 print("✨ Risultati caricati e tasti 'Download' trovati!")
             except:
                 print("⚠️ Tempo attesa risultati scaduto.")
@@ -91,23 +91,18 @@ def check_mollygram(page):
             print(f"⚠️ Errore ricerca: {e}")
             return []
 
-        # 3. Estrazione CHIRURGICA (Solo link di download)
-        # Cerchiamo:
-        # A) Link che contengono il dominio PROXY che hai identificato (il più sicuro)
-        # B) Link che contengono URL diretti ai media di Instagram
+        # 3. Estrazione CHIRURGICA
+        # Cerchiamo SOLO i link che hanno il testo "Download" o "Salva" o "DOWNLOAD HD"
+        download_elements = page.query_selector_all('a:has-text("Download"), a:has-text("Salva"), a:has-text("DOWNLOAD HD")')
         
-        # Questa query ora cerca solo link che contengono la parola "media" in anon-viewer o .mp4/.jpg
-        found_elements = page.query_selector_all('a[href*="anon-viewer.com/media"], a[href*=".mp4"], a[href*=".jpg"]')
-        
-        for el in found_elements:
+        for el in download_elements:
             url = el.get_attribute("href")
             
             if not url or "http" not in url:
                 continue
 
-            # Filtro FINALE: DEVE contenere il dominio proxy o cdninstagram
-            if "anon-viewer.com" in url or "cdninstagram.com" in url:
-                # Piccolo fix: a volte i link hanno parametri extra sporchi, li puliamo
+            # Filtro FINALE: DEVE contenere il dominio proxy e la parola "media"
+            if "anon-viewer.com" in url and "media" in url:
                 clean_link = url.split("?")[0] + "?" + url.split("?")[1] if "?" in url else url
                 links.append(clean_link)
 
