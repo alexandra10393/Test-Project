@@ -2,6 +2,8 @@ name: Motore B (Dispari)
 
 on:
   schedule:
+    # Esegui ogni ora (0-23) ai minuti specificati.
+    # Lasciamo che sia lo script Bash a decidere se stoppare o no in base all'ora italiana.
     - cron: '5,15,25,35,45,55 7-23,0 * * *'
   workflow_dispatch:
 
@@ -14,43 +16,58 @@ jobs:
     steps:
     - uses: actions/checkout@v3
 
-    # --- PUNTO 4: CACHE INTELLIGENTE ---
-    - name: Cache Playwright Browsers
+    # CONTROLLO ORARIO PRECISO ITALIANO (Punto 5)
+    - name: Check Orario Italiano (08:00 - 02:00)
+      id: check-time
+      run: |
+        # Ottieni l'ora attuale a Roma
+        hour=$(TZ="Europe/Rome" date +%H)
+        echo "Ora italiana: $hour"
+        
+        # Logica: Esegui se l'ora è >= 08 OPPURE < 02
+        # (Copre 08:00...23:59 e 00:00...01:59)
+        if [ "$hour" -ge 8 ] || [ "$hour" -lt 2 ]; then
+          echo "✅ Orario operativo. Procedo."
+          echo "run_bot=true" >> $GITHUB_OUTPUT
+        else
+          echo "💤 Orario notturno (02:00-08:00). Bot a nanna."
+          echo "run_bot=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Cache Playwright
+      if: steps.check-time.outputs.run_bot == 'true'
       uses: actions/cache@v3
-      id: playwright-cache
       with:
         path: ~/.cache/ms-playwright
         key: ${{ runner.os }}-playwright
 
     - uses: actions/setup-python@v4
+      if: steps.check-time.outputs.run_bot == 'true'
       with:
         python-version: '3.9'
-        cache: 'pip' # Cache automatica delle librerie Python
+        cache: 'pip'
 
-    - name: Installazione Dipendenze
-      run: |
-        pip install requests playwright
-        # Installa il browser solo se non è stato trovato nella cache
-        playwright install chromium
-
-    - name: Esecuzione Bot
+    - name: Installazione e Run
+      if: steps.check-time.outputs.run_bot == 'true'
       env:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         OCR_KEY: ${{ secrets.OCR_KEY }}
-      run: python main.py
+      run: |
+        pip install requests playwright
+        playwright install chromium
+        python main.py
 
-    # --- PUNTO 6: UPLOAD SCREENSHOT (Se esiste) ---
     - name: Upload Screenshot Errore
-      if: always() # Esegui questo passaggio anche se lo script fallisce
+      if: failure() && steps.check-time.outputs.run_bot == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: debug-screenshot
         path: error_screenshot.png
-        if-no-files-found: ignore # Se va tutto bene e non c'è foto, ignora e prosegui
-        retention-days: 1 # Tieni la foto solo 1 giorno per risparmiare spazio
+        retention-days: 1
 
     - uses: stefanzweifel/git-auto-commit-action@v4
+      if: steps.check-time.outputs.run_bot == 'true'
       with:
         commit_message: "Motore B: Aggiornamento"
         file_pattern: history.txt
