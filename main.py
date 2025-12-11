@@ -55,7 +55,7 @@ def ocr_scan(image_url):
     except: pass
     return ""
 
-# --- MOTORE 1: MOLLYGRAM (Filtro Finale: Estrazione Forensica) ---
+# --- MOTORE 1: MOLLYGRAM (Logica Finale: Estrazione Diretta) ---
 def check_mollygram(page):
     print(f"🔎 Controllo MOLLYGRAM per {IG_USER}...")
     links = []
@@ -76,47 +76,34 @@ def check_mollygram(page):
             search_input.wait_for(state="visible", timeout=10000)
             search_input.click()
             search_input.fill(IG_USER)
-            time.sleep(1)
             search_input.press('Enter')
             print("⌨️ Ricerca inviata...")
             
-            try:
-                # Attendiamo che appaiano i tasti di download
-                page.wait_for_selector('a:has-text("Download"), a:has-text("Salva"), a:has-text("DOWNLOAD HD")', timeout=20000)
-                print("✨ Risultati caricati e tasti 'Download HD' trovati!")
-            except:
-                print("⚠️ Tempo attesa risultati scaduto.")
+            # Attendiamo l'apparizione di un risultato
+            page.wait_for_selector('a:has-text("DOWNLOAD HD"), div.media-item', timeout=20000)
+            print("✨ Risultati caricati!")
 
         except Exception as e:
             print(f"⚠️ Errore ricerca: {e}")
             return []
 
-        # 3. Estrazione CHIRURGICA (Controlliamo tutti gli attributi sensibili)
+        # 3. Estrazione FORZATA (Catturiamo solo il link proxy)
         
-        # Cerchiamo i pulsanti di download che contengono il testo
-        download_elements = page.query_selector_all('a:has-text("Download"), a:has-text("Salva"), a:has-text("DOWNLOAD HD")')
+        # Estraiamo tutti gli attributi href dalla pagina intera dopo la ricerca
+        # E filtriamo solo ciò che sappiamo essere un link di media.
         
-        for el in download_elements:
-            url_candidato = None
-            
-            # Controlliamo gli attributi più probabili
-            for attr in ['href', 'data-url', 'data-href', 'download', 'link']:
-                val = el.get_attribute(attr)
-                if val and "http" in val:
-                    url_candidato = val
-                    break
-            
-            if not url_candidato:
-                continue
-
-            # Filtro FINALE: Deve contenere il dominio proxy e la parola "media"
-            if "anon-viewer.com" in url_candidato and "media" in url_candidato:
-                # Applichiamo il fix per la pulizia del link
+        # Playwright.evaluare JS per trovare tutti gli attributi 'href'
+        all_hrefs = page.evaluate('Array.from(document.querySelectorAll("a, img, video")).map(el => el.href || el.src || el.getAttribute("data-url") || el.getAttribute("data-href") || el.getAttribute("download"))')
+        
+        # Filtro: cerchiamo solo il link proxy che ci interessa
+        for url_candidato in all_hrefs:
+            if isinstance(url_candidato, str) and "anon-viewer.com" in url_candidato and "media" in url_candidato:
+                # Piccolo fix: puliamo il link se necessario
                 clean_link = url_candidato.split("?")[0] + "?" + url_candidato.split("?")[1] if "?" in url_candidato else url_candidato
                 links.append(clean_link)
-
+        
         links = list(dict.fromkeys(links))
-        print(f"✅ Mollygram PULITO: trovati {len(links)} link validi (Estrazione forensica OK).")
+        print(f"✅ Mollygram PULITO: trovati {len(links)} link validi (Estrazione JS OK).")
         return links
 
     except Exception as e:
