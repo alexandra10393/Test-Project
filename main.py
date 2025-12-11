@@ -6,9 +6,22 @@ from playwright.sync_api import sync_playwright
 from urllib.parse import unquote
 
 # --- CONFIGURAZIONE ---
-# Usa le variabili d'ambiente (Secrets) se ci sono, altrimenti i valori di default
-IG_USER = os.environ.get("IG_USER", "gabrieleparpiglia") 
-PAROLE_CHIAVE = ["DE MARTINO", "BELEN", "STEFANO DE MARTINO"]
+# Usa le variabili d'ambiente (Secrets)
+IG_USER = os.environ.get("IG_USER") 
+
+if not IG_USER:
+    raise ValueError("Il Secret IG_USER non è stato impostato o è vuoto. Impossibile continuare.")
+    
+KEYWORD_LIST = [
+    os.environ.get("KEYWORD_1"),
+    os.environ.get("KEYWORD_2"),
+    os.environ.get("KEYWORD_3")
+]
+
+PAROLE_CHIAVE = [k for k in KEYWORD_LIST if k is not None and k.strip()] 
+if not PAROLE_CHIAVE:
+    PAROLE_CHIAVE = []
+    
 SOGLIA_ALLUVIONE = 150   
 MAX_HISTORY = 300      
 
@@ -229,7 +242,7 @@ def run():
                     found_keyword = next((k for k in PAROLE_CHIAVE if k in txt), None)
                     
                     if found_keyword:
-                        # Usa .title() per trasformare "DE MARTINO" in "De Martino"
+                        # Usa .title() per dare la lettera maiuscola ai Nomi
                         dida = f"Storia su {found_keyword.title()}"
                 
                 send_telegram(dida, url, tipo == "VIDEO")
