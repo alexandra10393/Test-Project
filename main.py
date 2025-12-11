@@ -55,59 +55,78 @@ def ocr_scan(image_url):
     except: pass
     return ""
 
-# --- MOTORE 1: MOLLYGRAM (Logica Finale: Estrazione Diretta) ---
-def check_mollygram(page):
-    print(f"🔎 Controllo MOLLYGRAM per {IG_USER}...")
+# --- MOTORE 1: STORYSAVER.NET (Nuovo Motore Primario - Ricerca Simulata) ---
+def check_storysaver(page):
+    print(f"🔎 Controllo STORYSAVER.NET per {IG_USER}...")
     links = []
+    # Usiamo l'URL base come confermato dall'utente
+    target_url = "https://www.storysaver.net/it" 
+    
     try:
-        page.goto("https://mollygram.com/it", timeout=60000)
+        page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
         
-        # 1. Cookie
+        # 1. Gestione Cookie (Consent)
         try:
-            page.wait_for_selector("text=Consent, .fc-cta-consent", timeout=5000)
-            page.click("text=Consent, .fc-cta-consent")
-            print("🍪 Cookie accettati.")
-            time.sleep(1)
+            # Clicchiamo su pulsanti che contengono 'Consent' o 'Accept All'
+            page.click("button:has-text('Consent'), button:has-text('Accept All'), .fc-cta-consent", timeout=5000)
+            print("🍪 Cookie/Consenso accettato.")
+            time.sleep(2)
         except: pass
-
-        # 2. Ricerca
+        
+        # 2. Simula Ricerca Utente
         try:
-            search_input = page.locator('input[name="url"], input[type="text"]').first
+            # Cerchiamo l'input field (nome comune per questi siti)
+            search_input = page.locator('input[name="username"], input[type="text"]').first
             search_input.wait_for(state="visible", timeout=10000)
-            search_input.click()
             search_input.fill(IG_USER)
-            search_input.press('Enter')
-            print("⌨️ Ricerca inviata...")
             
-            # Attendiamo l'apparizione di un risultato
-            page.wait_for_selector('a:has-text("DOWNLOAD HD"), div.media-item', timeout=20000)
-            print("✨ Risultati caricati!")
+            # Clicca il tasto "Download" o "View" che si attiva accanto al campo di testo
+            search_button = page.locator("button:has-text('Download'), button:has-text('View')").first
+            search_button.wait_for(state="visible", timeout=10000)
+            search_button.click()
+            
+            print("⌨️ Ricerca utente inviata.")
 
         except Exception as e:
-            print(f"⚠️ Errore ricerca: {e}")
+            print(f"⚠️ Errore ricerca utente: {e}")
+            return []
+        
+        # 3. Cloudflare Check / Caricamento Risultati (Attesa prolungata)
+        try:
+            # Attendiamo che appaiano i risultati (ad es. il numero di storie o il tasto Save as Photo)
+            # Usiamo 25 secondi per dare tempo a Cloudflare di risolversi in automatico (JS Challenge)
+            page.wait_for_selector("a:has-text('Save as Photo'), div:has-text('storie totali')", timeout=25000)
+            print("✅ Contenuto caricato (Cloudflare risolto o bypassato).")
+            time.sleep(5) # Attesa extra per iniettare tutti i link
+        except Exception as e:
+            print(f"❌ Cloudflare/Caricamento bloccato dopo 25s: {e}")
+            # Se fallisce qui, significa che il bot non ha superato la verifica.
             return []
 
-        # 3. Estrazione FORZATA (Catturiamo solo il link proxy)
+        # 4. Estrazione dei link (Save as Photo/Video)
+        # Cerchiamo i link diretti a Instagram (cdninstagram)
+        raw_elements = page.query_selector_all('a:has-text("Save as Photo"), a:has-text("Save as Video")')
         
-        # Estraiamo tutti gli attributi href dalla pagina intera dopo la ricerca
-        # E filtriamo solo ciò che sappiamo essere un link di media.
+        if not raw_elements:
+             # Se non trova i pulsanti (es. la pagina è diversa), cerchiamo i tag media
+             raw_elements = page.query_selector_all('video source, img[src]')
         
-        # Playwright.evaluare JS per trovare tutti gli attributi 'href'
-        all_hrefs = page.evaluate('Array.from(document.querySelectorAll("a, img, video")).map(el => el.href || el.src || el.getAttribute("data-url") || el.getAttribute("data-href") || el.getAttribute("download"))')
-        
-        # Filtro: cerchiamo solo il link proxy che ci interessa
-        for url_candidato in all_hrefs:
-            if isinstance(url_candidato, str) and "anon-viewer.com" in url_candidato and "media" in url_candidato:
-                # Piccolo fix: puliamo il link se necessario
-                clean_link = url_candidato.split("?")[0] + "?" + url_candidato.split("?")[1] if "?" in url_candidato else url_candidato
-                links.append(clean_link)
-        
+        for el in raw_elements:
+            url = el.get_attribute("href") or el.get_attribute("src")
+            
+            if url and "cdninstagram.com" in url:
+                if "profile_pic" not in url and "favicon" not in url:
+                    links.append(url)
+
         links = list(dict.fromkeys(links))
-        print(f"✅ Mollygram PULITO: trovati {len(links)} link validi (Estrazione JS OK).")
+        print(f"✅ StorySaver: trovati {len(links)} link validi.")
         return links
 
     except Exception as e:
-        print(f"❌ Errore critico Mollygram: {e}")
+        print(f"❌ Errore critico StorySaver: {e}")
+        try:
+            page.screenshot(path="error_storysaver.png")
+        except: pass
         return []
         
 # --- MOTORE 2: IQSAVED (Riserva) ---
@@ -154,15 +173,14 @@ def run():
         )
         page = context.new_page()
 
-        # --- FASE 1: MOLLYGRAM ---
-        links_molly = check_mollygram(page)
+        # --- FASE 1: STORYSAVER.NET (Nuovo Primario) ---
+        links_saver = check_storysaver(page)
         
-        # --- FASE 2: IQSAVED (Solo se Molly ha pochi risultati o per sicurezza) ---
-        # Li eseguiamo entrambi per massimizzare le possibilità
+        # --- FASE 2: IQSAVED (Riserva) ---
         links_iq = check_iqsaved(page)
-
+        
         # Unione liste (senza duplicati)
-        tutti_i_link = list(set(links_molly + links_iq))
+        tutti_i_link = list(set(links_saver + links_iq))
         print(f"📦 Totale link unici trovati: {len(tutti_i_link)}")
 
         storie_da_processare = []
