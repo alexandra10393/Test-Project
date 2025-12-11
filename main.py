@@ -55,11 +55,10 @@ def ocr_scan(image_url):
     except: pass
     return ""
 
-# --- MOTORE 1: STORYSAVER.NET (Nuovo Motore Primario - Ricerca Simulata) ---
+# --- MOTORE 1: STORYSAVER.NET (Motore Primario - FINAL FIX) ---
 def check_storysaver(page):
     print(f"🔎 Controllo STORYSAVER.NET per {IG_USER}...")
     links = []
-    # Usiamo l'URL base come confermato dall'utente
     target_url = "https://www.storysaver.net/it" 
     
     try:
@@ -67,7 +66,6 @@ def check_storysaver(page):
         
         # 1. Gestione Cookie (Consent)
         try:
-            # Clicchiamo su pulsanti che contengono 'Consent' o 'Accept All'
             page.click("button:has-text('Consent'), button:has-text('Accept All'), .fc-cta-consent", timeout=5000)
             print("🍪 Cookie/Consenso accettato.")
             time.sleep(2)
@@ -75,17 +73,17 @@ def check_storysaver(page):
         
         # 2. Simula Ricerca Utente
         try:
-            # Cerchiamo l'input field (nome comune per questi siti)
             search_input = page.locator('input[name="username"], input[type="text"]').first
             search_input.wait_for(state="visible", timeout=10000)
             search_input.fill(IG_USER)
             
-            # Clicca il tasto "Download" o "View" che si attiva accanto al campo di testo
-            search_button = page.locator("button:has-text('Download'), button:has-text('View')").first
+            # AGGIORNAMENTO CRITICO: Pulsante "scarica!"
+            # Cerchiamo il pulsante con il testo esatto "scarica!"
+            search_button = page.locator("button:has-text('scarica!'), button[type='submit'], button.btn-danger").first
             search_button.wait_for(state="visible", timeout=10000)
             search_button.click()
             
-            print("⌨️ Ricerca utente inviata.")
+            print("⌨️ Ricerca utente inviata con 'scarica!'.")
 
         except Exception as e:
             print(f"⚠️ Errore ricerca utente: {e}")
@@ -94,21 +92,17 @@ def check_storysaver(page):
         # 3. Cloudflare Check / Caricamento Risultati (Attesa prolungata)
         try:
             # Attendiamo che appaiano i risultati (ad es. il numero di storie o il tasto Save as Photo)
-            # Usiamo 25 secondi per dare tempo a Cloudflare di risolversi in automatico (JS Challenge)
             page.wait_for_selector("a:has-text('Save as Photo'), div:has-text('storie totali')", timeout=25000)
             print("✅ Contenuto caricato (Cloudflare risolto o bypassato).")
-            time.sleep(5) # Attesa extra per iniettare tutti i link
+            time.sleep(5) 
         except Exception as e:
             print(f"❌ Cloudflare/Caricamento bloccato dopo 25s: {e}")
-            # Se fallisce qui, significa che il bot non ha superato la verifica.
             return []
 
         # 4. Estrazione dei link (Save as Photo/Video)
-        # Cerchiamo i link diretti a Instagram (cdninstagram)
         raw_elements = page.query_selector_all('a:has-text("Save as Photo"), a:has-text("Save as Video")')
         
         if not raw_elements:
-             # Se non trova i pulsanti (es. la pagina è diversa), cerchiamo i tag media
              raw_elements = page.query_selector_all('video source, img[src]')
         
         for el in raw_elements:
