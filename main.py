@@ -55,7 +55,7 @@ def ocr_scan(image_url):
     except: pass
     return ""
 
-# --- MOTORE 1: MOLLYGRAM (Con Filtro Anti-Spam) ---
+# --- MOTORE 1: MOLLYGRAM (Filtro Super-Sicuro) ---
 def check_mollygram(page):
     print(f"🔎 Controllo MOLLYGRAM per {IG_USER}...")
     links = []
@@ -80,57 +80,45 @@ def check_mollygram(page):
             search_input.press('Enter')
             print("⌨️ Ricerca inviata...")
             
-            # Aspettiamo i risultati veri (non la pubblicità)
             try:
-                # Cerchiamo elementi che sembrano storie (hanno spesso classe 'item' o simili)
-                # O aspettiamo semplicemente un po' di più che la pagina carichi i media esterni
-                time.sleep(10)
-                print("✨ Tempo caricamento terminato.")
-            except: pass
+                # Aspettiamo il caricamento dei risultati prima di estrarre
+                page.wait_for_selector('a:has-text("Download")', timeout=20000)
+                print("✨ Risultati caricati e tasti 'Download' trovati!")
+            except:
+                print("⚠️ Tempo attesa risultati scaduto.")
 
         except Exception as e:
             print(f"⚠️ Errore ricerca: {e}")
             return []
 
-        # 3. Estrazione CHIRURGICA
-        # Prendiamo TUTTI i link, ma poi li filtriamo pesantemente
-        all_links = page.query_selector_all('a')
+        # 3. Estrazione CHIRURGICA (Solo link di download)
+        # Cerchiamo:
+        # A) Link che contengono il dominio PROXY che hai identificato (il più sicuro)
+        # B) Link che contengono URL diretti ai media di Instagram
         
-        print(f"Dati grezzi trovati: {len(all_links)} elementi.")
+        # Questa query ora cerca solo link che contengono la parola "media" in anon-viewer o .mp4/.jpg
+        found_elements = page.query_selector_all('a[href*="anon-viewer.com/media"], a[href*=".mp4"], a[href*=".jpg"]')
         
-        for el in all_links:
+        for el in found_elements:
             url = el.get_attribute("href")
             
             if not url or "http" not in url:
                 continue
 
-            # --- FILTRO ANTI-SPAM (Il cuore della modifica) ---
-            
-            # 1. Deve contenere il dominio che hai scoperto tu (o estensioni video)
-            is_valid = False
-            if "anon-viewer" in url: is_valid = True
-            if ".mp4" in url: is_valid = True
-            if "cdninstagram" in url: is_valid = True  # A volte usano questo
-            
-            # 2. NON deve contenere parole "spazzatura"
-            bad_words = ["google", "adservice", "banner", "signup", "login", "logo", "assets", "reels"]
-            if any(bad in url.lower() for bad in bad_words):
-                is_valid = False
-
-            # Se supera i test, lo aggiungiamo
-            if is_valid:
+            # Filtro FINALE: DEVE contenere il dominio proxy o cdninstagram
+            if "anon-viewer.com" in url or "cdninstagram.com" in url:
                 # Piccolo fix: a volte i link hanno parametri extra sporchi, li puliamo
                 clean_link = url.split("?")[0] + "?" + url.split("?")[1] if "?" in url else url
                 links.append(clean_link)
 
         links = list(dict.fromkeys(links))
-        print(f"✅ Mollygram PULITO: trovati {len(links)} link validi (Spam scartato).")
+        print(f"✅ Mollygram PULITO: trovati {len(links)} link validi (Filtro proxy ok).")
         return links
 
     except Exception as e:
         print(f"❌ Errore critico Mollygram: {e}")
         return []
-
+        
 # --- MOTORE 2: IQSAVED (Riserva) ---
 def check_iqsaved(page):
     print(f"🔎 Controllo IQSAVED per {IG_USER}...")
