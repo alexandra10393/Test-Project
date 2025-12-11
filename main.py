@@ -238,15 +238,23 @@ def run():
 
         browser.close()
 
-        updated_history = seen_ids + ids_to_add
-        if len(updated_history) > MAX_HISTORY:
-            updated_history = updated_history[-MAX_HISTORY:]
-        
         if ids_to_add:
             with open("history.txt", "w") as f:
                 for sid in updated_history:
                     f.write(f"{sid}\n")
-            print("💾 History aggiornata.")
+            print(f"\n💾 History aggiornata: {len(updated_history)} elementi totali")
+
+        # === HEALTH CHECK CRITICO (Avviso di Fallimento Totale) ===
+        # Se la lista totale dei link trovati è vuota, significa che entrambi i siti hanno fallito
+        # o il profilo è diventato privato/vuoto.
+        if len(tutti_i_link) == 0:
+            print("🚨 NESSUN LINK TROVATO! Invio allarme...")
+            error_msg = f"🔴 ⚠️ ALLARME CRITICO: Il Bot non ha trovato ALCUNA storia per {IG_USER}.\n\nCause possibili:\n1. Il profilo è diventato PRIVATO.\n2. StoriesViewer e IQSaved sono entrambi GIÙ.\n3. Nessuna storia presente nelle ultime 24h."
+            send_telegram(error_msg)
+        # =========================================================
+        
+        print(f"\n✅ BOT COMPLETATO")
+        print(f"📊 Riepilogo: {num_nuove} storie processate, {len(ids_to_add)} aggiunte a history")
 
 if __name__ == "__main__":
     run()
