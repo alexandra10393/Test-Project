@@ -211,18 +211,23 @@ def run():
                 tipo = "VIDEO" if ".mp4" in url else "FOTO"
                 
                 dida = "Storia"
+
+                # --- MODIFICA OCR GENTILE ---
                 if tipo == "FOTO" and OCR_KEY:
                     txt = ocr_scan(url)
-                    if any(k in txt for k in PAROLE_CHIAVE):
-                        dida = f"🔥 TROVATO KEYWORD: {txt[:50]}..."
-
+                    # Cerca quale parola chiave specifica è stata trovata
+                    found_keyword = next((k for k in PAROLE_CHIAVE if k in txt), None)
+                    
+                    if found_keyword:
+                        # Usa .title() per trasformare "DE MARTINO" in "De Martino"
+                        dida = f"Storia su {found_keyword.title()}"
+                
                 send_telegram(dida, url, tipo == "VIDEO")
                 ids_to_add.append(clean_id)
                 time.sleep(3)
 
         browser.close()
 
-        # Salvataggio History
         updated_history = seen_ids + ids_to_add
         if len(updated_history) > MAX_HISTORY:
             updated_history = updated_history[-MAX_HISTORY:]
