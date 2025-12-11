@@ -51,6 +51,10 @@ jobs:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         OCR_KEY: ${{ secrets.OCR_KEY }}
+        IG_USER: ${{ secrets.IG_USER }}
+        KEYWORD_1: ${{ secrets.KEYWORD_1 }}
+        KEYWORD_2: ${{ secrets.KEYWORD_2 }}
+        KEYWORD_3: ${{ secrets.KEYWORD_3 }}
       run: python main.py
 
     - name: Upload Screenshot Errore (Se fallisce)
