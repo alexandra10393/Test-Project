@@ -8,10 +8,7 @@ from urllib.parse import unquote
 # --- CONFIGURAZIONE ---
 # Usa le variabili d'ambiente (Secrets)
 IG_USER = os.environ.get("IG_USER") 
-
-if not IG_USER:
-    raise ValueError("Il Secret IG_USER non è stato impostato o è vuoto. Impossibile continuare.")
-    
+ 
 KEYWORD_LIST = [
     os.environ.get("KEYWORD_1"),
     os.environ.get("KEYWORD_2"),
