@@ -253,6 +253,13 @@ def run():
         browser.close()
 
         if ids_to_add:
+            # Uniamo la vecchia history con i nuovi ID
+            updated_history = seen_ids + ids_to_add
+            
+            # Manteniamo solo gli ultimi MAX_HISTORY elementi per non ingrossare il file
+            if len(updated_history) > MAX_HISTORY:
+                updated_history = updated_history[-MAX_HISTORY:]
+            
             with open("history.txt", "w") as f:
                 for sid in updated_history:
                     f.write(f"{sid}\n")
