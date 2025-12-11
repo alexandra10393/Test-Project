@@ -8,7 +8,7 @@ from playwright.sync_api import sync_playwright
 IG_USER = "gabrieleparpiglia"
 TARGET_URL = f"https://iqsaved.com/it/viewer/{IG_USER}/"
 PAROLE_CHIAVE = ["DE MARTINO", "BELEN", "STEFANO DE MARTINO"]
-SOGLIA_ALLUVIONE = 5   
+SOGLIA_ALLUVIONE = 50   
 MAX_HISTORY = 200      
 
 # RECUPERO CHIAVI
