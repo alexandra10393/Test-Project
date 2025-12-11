@@ -3,6 +3,7 @@ import time
 import re
 import requests
 from playwright.sync_api import sync_playwright
+from urllib.parse import unquote
 
 # --- CONFIGURAZIONE ---
 # Usa le variabili d'ambiente (Secrets) se ci sono, altrimenti i valori di default
@@ -55,70 +56,83 @@ def ocr_scan(image_url):
     except: pass
     return ""
 
-# --- MOTORE 1: STORYSAVER.NET (Motore Primario - FINALISSIMA) ---
-def check_storysaver(page):
-    print(f"🔎 Controllo STORYSAVER.NET per {IG_USER}...")
+# === MOTORE: STORIESVIEWER.NET (Click Fisico sulla Lente) ===
+def check_storiesviewer(page):
+    print(f"⏩ Controllo StoriesViewer.net...")
+    target_url = "https://storiesviewer.net/it/"
     links = []
-    target_url = "https://www.storysaver.net/it" 
     
     try:
+        # 1. Carica la Home
         page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
         
-        # 1. Gestione Cookie (Consent)
+        # Gestione Cookie (se presente)
         try:
-            page.click("button:has-text('Consent'), button:has-text('Accept All'), .fc-cta-consent", timeout=5000)
-            print("🍪 Cookie/Consenso accettato.")
-            time.sleep(2)
+            page.click("button:has-text('Consent'), .fc-cta-consent", timeout=3000)
         except: pass
         
-        # 2. Simula Ricerca Utente
+        # 2. Ricerca
         try:
-            search_input = page.locator('input[name="username"], input[type="text"]').first
+            # Cerca la barra di input
+            search_input = page.locator('input[name="url"], input[type="text"]').first
             search_input.wait_for(state="visible", timeout=10000)
+            search_input.click()
             search_input.fill(IG_USER)
+            time.sleep(1)
             
-            # AGGIORNAMENTO CRITICO: INCLUDIAMO ANCHE IL TAG LINK (<a>)
-            search_button = page.locator("button:has-text('scarica!'), a:has-text('scarica!'), button[type='submit'], button.btn-danger").first
-            search_button.wait_for(state="visible", timeout=10000)
-            search_button.click()
+            # CLICCARE LA LENTE (Modifica Cruciale)
+            print("🔍 Cerco il tasto lente...")
             
-            print("⌨️ Ricerca utente inviata con 'scarica!'.")
-
+            # Proviamo diversi selettori comuni per il tasto cerca con lente
+            # 1. Bottone generico di submit
+            # 2. Bottone che contiene un tag 'i' (icona)
+            # 3. Bottone con classe 'btn-default' (comune in questi script)
+            search_btn = page.locator('button[type="submit"], button:has(i), button.btn-default').first
+            
+            search_btn.wait_for(state="visible", timeout=5000)
+            search_btn.click()
+            print("🖱️ Lente cliccata!")
+            
         except Exception as e:
-            print(f"⚠️ Errore ricerca utente: {e}")
+            print(f"⚠️ Errore fase ricerca (Lente non trovata o non cliccabile): {e}")
             return []
-        
-        # 3. Cloudflare Check / Caricamento Risultati (Attesa prolungata)
+
+        # 3. Attesa Risultati
+        print("⏳ Attendo caricamento storie...")
+        # Aspettiamo il tasto "Download HD" che hai identificato tu
         try:
-            page.wait_for_selector("a:has-text('Save as Photo'), div:has-text('storie totali')", timeout=25000)
-            print("✅ Contenuto caricato (Cloudflare risolto o bypassato).")
-            time.sleep(5) 
-        except Exception as e:
-            print(f"❌ Cloudflare/Caricamento bloccato dopo 25s: {e}")
+            page.wait_for_selector('a:has-text("Download HD")', timeout=20000)
+            print("✨ Tasti 'Download HD' apparsi!")
+        except:
+            print("⚠️ Timeout: Nessun risultato trovato o caricamento lento.")
             return []
-
-        # 4. Estrazione dei link (Save as Photo/Video)
-        raw_elements = page.query_selector_all('a:has-text("Save as Photo"), a:has-text("Save as Video")')
-        
-        if not raw_elements:
-             raw_elements = page.query_selector_all('video source, img[src]')
+            
+        # 4. Estrazione e Decodifica
+        # Cerchiamo tutti i link che contengono "media.php"
+        raw_elements = page.query_selector_all('a[href*="media.php"]')
         
         for el in raw_elements:
-            url = el.get_attribute("href") or el.get_attribute("src")
+            raw_url = el.get_attribute("href")
             
-            if url and "cdninstagram.com" in url:
-                if "profile_pic" not in url and "favicon" not in url:
-                    links.append(url)
+            # Il link è tipo: media.php?media=https%3A%2F%2F...
+            if raw_url and "media=" in raw_url:
+                try:
+                    # Estraiamo la parte dopo media=
+                    encoded_part = raw_url.split("media=")[1].split("&")[0]
+                    # Decodifichiamo (trasforma %3A in : e %2F in /)
+                    clean_url = unquote(encoded_part)
+                    
+                    if "cdninstagram.com" in clean_url:
+                        links.append(clean_url)
+                except:
+                    continue
 
         links = list(dict.fromkeys(links))
-        print(f"✅ StorySaver: trovati {len(links)} link validi.")
+        print(f"✅ StoriesViewer: {len(links)} link trovati e decodificati.")
         return links
-
+        
     except Exception as e:
-        print(f"❌ Errore critico StorySaver: {e}")
-        try:
-            page.screenshot(path="error_storysaver.png")
-        except: pass
+        print(f"❌ Errore StoriesViewer: {e}")
         return []
         
 # --- MOTORE 2: IQSAVED (Riserva) ---
@@ -165,23 +179,30 @@ def run():
         )
         page = context.new_page()
 
-        # --- FASE 1: STORYSAVER.NET (Nuovo Primario) ---
-        links_saver = check_storysaver(page)
+        # --- STRATEGIA NUOVA (StoriesViewer + IQSaved) ---
+        all_links = []
+
+        # FASE 1: StoriesViewer (Sito Veloce con estrazione Proxy)
+        # Questo usa la nuova funzione check_storiesviewer che clicca la lente
+        links_viewer = check_storiesviewer(page)
+        all_links.extend(links_viewer)
         
-        # --- FASE 2: IQSAVED (Riserva) ---
-        links_iq = check_iqsaved(page)
+        # FASE 2: IQSaved (Riserva)
+        # Lo usiamo solo se il primo sito ha fallito o trovato meno di 5 storie
+        if len(all_links) < 5:
+            print("\n=== FASE 2: IQSAVED (FALLBACK) ===")
+            links_iq = check_iqsaved(page) # Usa la tua funzione IQSaved esistente
+            all_links.extend(links_iq)
         
-        # Unione liste (senza duplicati)
-        tutti_i_link = list(set(links_saver + links_iq))
+        # Unione liste (senza duplicati) e conteggio
+        tutti_i_link = list(dict.fromkeys(all_links))
         print(f"📦 Totale link unici trovati: {len(tutti_i_link)}")
 
         storie_da_processare = []
         for url in tutti_i_link:
             clean_id = get_clean_id(url)
             
-            # Filtro base: ignoriamo se non sembra una storia (opzionale)
-            # Ma visto che history protegge, prendiamo tutto.
-            
+            # Aggiungiamo alla lista solo se non l'abbiamo già vista
             if clean_id not in seen_ids:
                 storie_da_processare.append({'url': url, 'id': clean_id})
 
