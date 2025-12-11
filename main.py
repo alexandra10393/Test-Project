@@ -5,11 +5,11 @@ import requests
 from playwright.sync_api import sync_playwright
 
 # --- CONFIGURAZIONE ---
-IG_USER = "gabrieleparpiglia"
-TARGET_URL = f"https://iqsaved.com/it/viewer/{IG_USER}/"
+# Usa le variabili d'ambiente (Secrets) se ci sono, altrimenti i valori di default
+IG_USER = os.environ.get("IG_USER", "gabrieleparpiglia") 
 PAROLE_CHIAVE = ["DE MARTINO", "BELEN", "STEFANO DE MARTINO"]
 SOGLIA_ALLUVIONE = 50   
-MAX_HISTORY = 200      
+MAX_HISTORY = 300      
 
 # RECUPERO CHIAVI
 TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -17,9 +17,12 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 OCR_KEY = os.environ.get("OCR_KEY", "")
 
 def get_clean_id(url):
+    # Cerca di estrarre un ID univoco dal link (funziona per entrambi i siti)
     try:
         if "filename=" in url:
             return url.split("filename=")[1].split("&")[0]
+        if "/media/" in url:
+            return url.split("/media/")[1].split("?")[0]
         return url.split("/")[-1].split("?")[0]
     except:
         return url
@@ -27,22 +30,24 @@ def get_clean_id(url):
 def send_telegram(text, media_url=None, is_video=False):
     api_url = f"https://api.telegram.org/bot{TOKEN}/"
     method = "sendVideo" if is_video else "sendPhoto"
-    print(f"Tentativo invio Telegram: {text}")
+    print(f"✈️ Invio Telegram: {text}")
+    
     if media_url:
         try:
             payload = {"chat_id": CHAT_ID, "caption": text, "parse_mode": "HTML"}
             files_key = 'video' if is_video else 'photo'
-            requests.post(api_url + method, data=payload, params={files_key: media_url}, timeout=60)
+            # Timeout aumentato per video pesanti
+            requests.post(api_url + method, data=payload, params={files_key: media_url}, timeout=120)
         except Exception as e:
-            print(f"Errore media: {e}")
-            requests.post(api_url + "sendMessage", json={"chat_id": CHAT_ID, "text": text + f"\n\n(Link: {media_url})"})
+            print(f"❌ Errore invio media: {e}")
+            # Fallback: invia solo il link
+            requests.post(api_url + "sendMessage", json={"chat_id": CHAT_ID, "text": text + f"\n\n(Link diretto: {media_url})"})
     else:
         requests.post(api_url + "sendMessage", json={"chat_id": CHAT_ID, "text": text})
 
 def ocr_scan(image_url):
     if not OCR_KEY: return ""
     try:
-        # Timeout breve per l'OCR
         url = f"https://api.ocr.space/parse/imageurl?apikey={OCR_KEY}&url={image_url}&language=ita&isOverlayRequired=false"
         r = requests.get(url, timeout=10).json() 
         if r.get("ParsedResults"):
@@ -50,64 +55,123 @@ def ocr_scan(image_url):
     except: pass
     return ""
 
-def extract_links_from_page(page):
-    content = page.content()
-    links = re.findall(r'https://cdn\.iqsaved\.com/[^"\']+', content)
-    links = [l.replace('&amp;', '&') for l in links]
-    return list(dict.fromkeys(links))
+# --- MOTORE 1: MOLLYGRAM (Prioritario) ---
+def check_mollygram(page):
+    print(f"🔎 Controllo MOLLYGRAM per {IG_USER}...")
+    links = []
+    try:
+        page.goto("https://mollygram.com/it", timeout=60000)
+        time.sleep(5)
+
+        # 1. Gestione Cookie/Consent
+        try:
+            page.click("text=Consent", timeout=3000)
+            print("🍪 Cookie accettati.")
+            time.sleep(1)
+        except: pass
+
+        # 2. Ricerca Utente
+        try:
+            # Scrive l'utente nella barra di ricerca
+            page.fill('input[name="url"]', IG_USER)
+            page.press('input[name="url"]', 'Enter')
+            print("⌨️ Utente cercato, attendo risultati...")
+            
+            # Aspetta che carichi (cerca un elemento che appare dopo la ricerca)
+            # A volte apre una nuova pagina o aggiorna quella attuale
+            time.sleep(8) 
+        except Exception as e:
+            print(f"⚠️ Errore ricerca Mollygram: {e}")
+            return []
+
+        # 3. Scroll verso il basso (le storie sono in fondo)
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        time.sleep(3)
+        
+        # 4. Estrazione Link "Download HD" o video/img diretti
+        # Cerchiamo i tasti che contengono i link
+        # Mollygram spesso usa tasti con scritto "Download" o "Download HD"
+        # Cerchiamo tutti i tag <a> che finiscono con .mp4 o .jpg o hanno classi specifiche
+        
+        # Metodo generico robusto per Mollygram:
+        found_elements = page.query_selector_all('a[href*=".mp4"], a[href*=".jpg"], a[href*=".jpeg"]')
+        
+        for el in found_elements:
+            link = el.get_attribute("href")
+            if link and "http" in link:
+                links.append(link)
+
+        # Rimuove duplicati
+        links = list(dict.fromkeys(links))
+        print(f"✅ Mollygram: trovati {len(links)} link potenziali.")
+        return links
+
+    except Exception as e:
+        print(f"❌ Errore critico Mollygram: {e}")
+        return []
+
+# --- MOTORE 2: IQSAVED (Riserva) ---
+def check_iqsaved(page):
+    print(f"🔎 Controllo IQSAVED per {IG_USER}...")
+    target_url = f"https://iqsaved.com/it/viewer/{IG_USER}/"
+    links = []
+    try:
+        page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
+        time.sleep(5)
+        
+        try:
+            page.click("button.fc-cta-consent, button.primary-button, .cookie-agree", timeout=3000)
+        except: pass
+
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        time.sleep(3)
+
+        content = page.content()
+        raw_links = re.findall(r'https://cdn\.iqsaved\.com/[^"\']+', content)
+        links = [l.replace('&amp;', '&') for l in raw_links]
+        
+        print(f"✅ IQSaved: trovati {len(links)} link.")
+        return list(dict.fromkeys(links))
+    except Exception as e:
+        print(f"❌ Errore IQSaved: {e}")
+        return []
 
 def run():
-    print("Avvio Browser...")
+    print("🚀 Avvio Bot Ibrido...")
+    
+    # Carica History
+    seen_ids = []
+    if os.path.exists("history.txt"):
+        with open("history.txt", "r") as f:
+            seen_ids = f.read().splitlines()
+
     with sync_playwright() as p:
+        # Browser con viewport più grande per simulare desktop
         browser = p.chromium.launch(headless=True)
-        context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            viewport={'width': 1280, 'height': 800}
+        )
         page = context.new_page()
+
+        # --- FASE 1: MOLLYGRAM ---
+        links_molly = check_mollygram(page)
         
-        found_links = []
+        # --- FASE 2: IQSAVED (Solo se Molly ha pochi risultati o per sicurezza) ---
+        # Li eseguiamo entrambi per massimizzare le possibilità
+        links_iq = check_iqsaved(page)
 
-        try:
-            # TIMEOUT AGGRESSIVI (Punto 1)
-            print("Caricamento pagina...")
-            page.goto(TARGET_URL, timeout=60000, wait_until="domcontentloaded") # Max 60s
-            time.sleep(8)
+        # Unione liste (senza duplicati)
+        tutti_i_link = list(set(links_molly + links_iq))
+        print(f"📦 Totale link unici trovati: {len(tutti_i_link)}")
 
-            try:
-                page.click("button.fc-cta-consent, button.primary-button, .cookie-agree", timeout=5000) # Max 5s
-                time.sleep(2)
-            except: pass
-
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(5)
-            
-            found_links = extract_links_from_page(page)
-
-            # Retry se 0 link
-            if len(found_links) == 0:
-                print("⚠️ 0 link trovati. Reload...")
-                page.reload(timeout=60000)
-                time.sleep(10)
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(5)
-                found_links = extract_links_from_page(page)
-
-        except Exception as e:
-            print(f"Errore critico pagina: {e}")
-            try:
-                page.screenshot(path="error_screenshot.png")
-            except: pass
-            browser.close()
-            return
-
-        # GESTIONE MEMORIA
-        seen_ids = []
-        if os.path.exists("history.txt"):
-            with open("history.txt", "r") as f:
-                seen_ids = f.read().splitlines()
-        
         storie_da_processare = []
-        for url in found_links:
-            if "filename=" not in url: continue
+        for url in tutti_i_link:
             clean_id = get_clean_id(url)
+            
+            # Filtro base: ignoriamo se non sembra una storia (opzionale)
+            # Ma visto che history protegge, prendiamo tutto.
+            
             if clean_id not in seen_ids:
                 storie_da_processare.append({'url': url, 'id': clean_id})
 
@@ -115,40 +179,38 @@ def run():
         ids_to_add = []
 
         if num_nuove > SOGLIA_ALLUVIONE:
-            print(f"⚠️ FLOOD GUARD ATTIVO ({num_nuove} storie). Skip notifiche e OCR.")
+            print(f"⚠️ FLOOD GUARD ({num_nuove} > {SOGLIA_ALLUVIONE}). Skip invio.")
             for item in storie_da_processare:
                 ids_to_add.append(item['id'])
         else:
+            print(f"📨 Invio {num_nuove} nuove storie...")
             for item in storie_da_processare:
                 url = item['url']
                 clean_id = item['id']
-                tipo = "VIDEO" if ".mp4" in url or "video" in url else "FOTO"
+                tipo = "VIDEO" if ".mp4" in url else "FOTO"
                 
                 dida = "Storia"
-                # OCR SELETTIVO (Punto 3): Lo facciamo solo se NON siamo in flood
                 if tipo == "FOTO" and OCR_KEY:
                     txt = ocr_scan(url)
-                    for k in PAROLE_CHIAVE:
-                        if k in txt: 
-                            dida = f"Storia su {k.title()}"
-                            break
-                
+                    if any(k in txt for k in PAROLE_CHIAVE):
+                        dida = f"🔥 TROVATO KEYWORD: {txt[:50]}..."
+
                 send_telegram(dida, url, tipo == "VIDEO")
                 ids_to_add.append(clean_id)
                 time.sleep(3)
 
         browser.close()
 
-        # SALVATAGGIO (Rolling Buffer)
+        # Salvataggio History
         updated_history = seen_ids + ids_to_add
         if len(updated_history) > MAX_HISTORY:
             updated_history = updated_history[-MAX_HISTORY:]
         
-        if ids_to_add or len(seen_ids) != len(updated_history):
+        if ids_to_add:
             with open("history.txt", "w") as f:
                 for sid in updated_history:
                     f.write(f"{sid}\n")
-            print("History aggiornata.")
+            print("💾 History aggiornata.")
 
 if __name__ == "__main__":
     run()
