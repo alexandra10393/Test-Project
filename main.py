@@ -180,6 +180,10 @@ def run():
         with open("history.txt", "r") as f:
             seen_ids = f.read().splitlines()
 
+ # Definisci le variabili all'inizio per evitare NameError
+    updated_history = seen_ids.copy()
+    ids_to_add = []
+
     with sync_playwright() as p:
         # Browser con viewport più grande per simulare desktop
         browser = p.chromium.launch(headless=True)
