@@ -125,7 +125,35 @@ def track_performance(phase, duration):
             f.write(f"{timestamp}|{phase}|{duration:.2f}\n")
     except Exception as e:
         print(f"⚠️ Errore log performance: {e}")
-
+        
+def log_semplice(messaggio):
+    """Scrive un messaggio semplice da leggere su telefono"""
+    # Prende l'ora attuale (es: "14:30")
+    ora_attuale = datetime.now().strftime("%H:%M")
+    
+    # Crea la riga del log
+    riga_log = f"[{ora_attuale}] {messaggio}"
+    
+    # La scrive nel file
+    with open("log_telefono.txt", "a", encoding="utf-8") as file:
+        file.write(riga_log + "\n")
+    
+    # Tiene solo le ultime 50 righe (per non ingrandire troppo)
+    try:
+        with open("log_telefono.txt", "r", encoding="utf-8") as file:
+            tutte_righe = file.readlines()
+        
+        if len(tutte_righe) > 50:
+            # Tieni solo le ultime 50
+            ultime_50 = tutte_righe[-50:]
+            with open("log_telefono.txt", "w", encoding="utf-8") as file:
+                file.writelines(ultime_50)
+    except:
+        pass  # Se c'è errore, non fare niente
+    
+    # Stampa anche nella console
+    print(riga_log)
+    
 def track_failure(site, status):
     """Traccia fallimenti consecutivi per ogni sito"""
     try:
@@ -267,7 +295,10 @@ def check_disk_space(min_mb=5):
 # CONFIGURAZIONE
 # ===============================
 
-IG_USER = os.environ.get("IG_USER") 
+IG_USER = os.environ.get("IG_USER", "").strip()
+if not IG_USER or not IG_USER.replace('_', '').replace('.', '').isalnum():
+    print("❌ ERRORE: Nome Instagram non valido!")
+    exit(1)
 
 KEYWORD_LIST = [
     os.environ.get("KEYWORD_1"),
@@ -625,8 +656,23 @@ def emergency_cleanup(browser=None, context=None):
 def run():
     """Funzione principale del bot"""
     cleanup_old_logs(7)  # Pulisce log vecchi di 7 giorni
+
+    # Backup automatico history
+if os.path.exists("history.txt"):
+    import shutil
+    data_oggi = datetime.now().strftime("%Y%m%d")
+    backup_file = f"history_backup_{data_oggi}.txt"
+    if not os.path.exists(backup_file):
+        shutil.copy2("history.txt", backup_file)
+        print(f"💾 Backup creato: {backup_file}")
     
-    print("🚀 Avvio Bot Ibrido Avanzato...")
+    # Tieni solo ultimi 7 backup
+    backups = sorted([f for f in os.listdir(".") if f.startswith("history_backup_")])
+    for old_backup in backups[:-7]:  # Rimuovi vecchi
+        os.remove(old_backup)
+        print(f"🗑️  Rimosso vecchio backup: {old_backup}")
+    
+    log_semplice("🚀 Avvio Bot Ibrido Avanzato...")
     
     start_total = time.time()
     phase_timers = {
@@ -671,6 +717,7 @@ def run():
                     '--mute-audio',
                     '--no-first-run',
                     '--single-process',
+                    '--max_old_space_size=256',
                     '--disable-features=site-per-process,TranslateUI',
                     '--disable-blink-features=AutomationControlled',
                     '--disable-background-timer-throttling',
@@ -693,7 +740,7 @@ def run():
                     safe_check_storiesviewer, max_retries=1, page=page
                 )
                 all_links = links_viewer.copy()
-                print(f"✅ StoriesViewer: {len(links_viewer)} link")
+                log_semplice(f"✅ StoriesViewer: {len(links_viewer)} storie")
             except Exception as e:
                 print(f"❌ StoriesViewer fallito anche dopo retry: {e}")
                 links_viewer, storiesviewer_status, storiesviewer_error = [], "RETRY_FAILED", str(e)
@@ -730,7 +777,7 @@ def run():
         phase_start = time.time()
         
         tutti_i_link = validate_links(all_links)
-        print(f"📦 Totale link validi: {len(tutti_i_link)}")
+        log_semplice(f"📦 Totale storie trovate: {len(tutti_i_link)}")
         
         storie_da_processare = []
         for url in tutti_i_link:
@@ -750,7 +797,7 @@ def run():
             for item in storie_da_processare:
                 ids_to_add.append(item['id'])
         elif num_nuove > 0:
-            print(f"📨 Invio {num_nuove} nuove storie...")
+            log_semplice(f"📨 Invio {num_nuove} nuove storie...")
             
             for i, item in enumerate(storie_da_processare):
                 url = item['url']
@@ -875,9 +922,10 @@ def run():
                 )
         
         print(f"\n✅ BOT COMPLETATO")
-        print(f"📊 Riepilogo: {len(tutti_i_link)} storie trovate, {num_nuove} nuove")
+        log_semplice(f"✅ Bot completato: {num_nuove} nuove su {len(tutti_i_link)}")
         
     except Exception as e:
+        log_semplice(f"💀 ERRORE GRAVE: {str(e)[:100]}")
         print(f"💀 ERRORE FATALE nel run(): {e}")
         emergency_cleanup(browser, context)
         
