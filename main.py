@@ -324,7 +324,7 @@ def emergency_cleanup(browser=None, context=None):
     import gc
     gc.collect()
     print("✅ Cleanup di emergenza completato")
-# -----------------------------------------------------------------
+
 def run():
     print("🚀 Avvio Bot Ibrido...")
 
@@ -363,73 +363,78 @@ def run():
             
             page = context.new_page()
 
-        # --- STRATEGIA NUOVA (StoriesViewer + IQSaved) ---
-        all_links = []
+            # --- STRATEGIA NUOVA (StoriesViewer + IQSaved) ---
+            all_links = []
 
-        # FASE 1: StoriesViewer (con recovery)
-        try:
-            links_viewer, storiesviewer_status, storiesviewer_error = safe_check_storiesviewer(page)
-            all_links.extend(links_viewer)
-            print(f"✅ StoriesViewer completato: {len(links_viewer)} link")
-        except Exception as e:
-            print(f"⚠️ Fallback a safe_check: {e}")
-            links_viewer, storiesviewer_status, storiesviewer_error = [], "SAFECHECK_ERROR", str(e)[:100]
-        
-        # FASE 2: IQSaved (Riserva con recovery)
-        links_iq, iqsaved_status, iqsaved_error = [], "NOT_TESTED", ""
-        try:
-            if len(all_links) < 5:
-                print("\n=== FASE 2: IQSAVED (FALLBACK) ===")
-                links_iq, iqsaved_status, iqsaved_error = safe_check_iqsaved(page)
-                all_links.extend(links_iq)
-                print(f"✅ IQSaved completato: {len(links_iq)} link")
-        except Exception as e:
-            print(f"⚠️ Fallback IQSaved fallito: {e}")
-            links_iq, iqsaved_status, iqsaved_error = [], "SAFECHECK_ERROR", str(e)[:100]
-        
-        # Unione liste (senza duplicati) e conteggio
-        tutti_i_link = list(dict.fromkeys(all_links))
-        print(f"📦 Totale link unici trovati: {len(tutti_i_link)}")
-
-        storie_da_processare = []
-        for url in tutti_i_link:
-            clean_id = get_clean_id(url)
+            # FASE 1: StoriesViewer (con recovery)
+            try:
+                links_viewer, storiesviewer_status, storiesviewer_error = safe_check_storiesviewer(page)
+                all_links.extend(links_viewer)
+                print(f"✅ StoriesViewer completato: {len(links_viewer)} link")
+            except Exception as e:
+                print(f"⚠️ Fallback a safe_check: {e}")
+                links_viewer, storiesviewer_status, storiesviewer_error = [], "SAFECHECK_ERROR", str(e)[:100]
             
-            # Aggiungiamo alla lista solo se non l'abbiamo già vista
-            if clean_id not in seen_ids:
-                storie_da_processare.append({'url': url, 'id': clean_id})
+            # FASE 2: IQSaved (Riserva con recovery)
+            links_iq, iqsaved_status, iqsaved_error = [], "NOT_TESTED", ""
+            try:
+                if len(all_links) < 5:
+                    print("\n=== FASE 2: IQSAVED (FALLBACK) ===")
+                    links_iq, iqsaved_status, iqsaved_error = safe_check_iqsaved(page)
+                    all_links.extend(links_iq)
+                    print(f"✅ IQSaved completato: {len(links_iq)} link")
+            except Exception as e:
+                print(f"⚠️ Fallback IQSaved fallito: {e}")
+                links_iq, iqsaved_status, iqsaved_error = [], "SAFECHECK_ERROR", str(e)[:100]
+            
+            # Unione liste (senza duplicati) e conteggio
+            tutti_i_link = list(dict.fromkeys(all_links))
+            print(f"📦 Totale link unici trovati: {len(tutti_i_link)}")
 
-        num_nuove = len(storie_da_processare)
-        ids_to_add = []
-
-        if num_nuove > SOGLIA_ALLUVIONE:
-            print(f"⚠️ FLOOD GUARD ({num_nuove} > {SOGLIA_ALLUVIONE}). Skip invio.")
-            for item in storie_da_processare:
-                ids_to_add.append(item['id'])
-        else:
-            print(f"📨 Invio {num_nuove} nuove storie...")
-            for item in storie_da_processare:
-                url = item['url']
-                clean_id = item['id']
-                tipo = "VIDEO" if ".mp4" in url else "FOTO"
+            storie_da_processare = []
+            for url in tutti_i_link:
+                clean_id = get_clean_id(url)
                 
-                dida = "Storia"
+                # Aggiungiamo alla lista solo se non l'abbiamo già vista
+                if clean_id not in seen_ids:
+                    storie_da_processare.append({'url': url, 'id': clean_id})
 
-                # --- MODIFICA OCR GENTILE ---
-                if tipo == "FOTO" and OCR_KEY:
-                    txt = ocr_scan(url)
-                    # Cerca quale parola chiave specifica è stata trovata
-                    found_keyword = next((k for k in PAROLE_CHIAVE if k in txt), None)
+            num_nuove = len(storie_da_processare)
+            ids_to_add = []
+
+            if num_nuove > SOGLIA_ALLUVIONE:
+                print(f"⚠️ FLOOD GUARD ({num_nuove} > {SOGLIA_ALLUVIONE}). Skip invio.")
+                for item in storie_da_processare:
+                    ids_to_add.append(item['id'])
+            else:
+                print(f"📨 Invio {num_nuove} nuove storie...")
+                for item in storie_da_processare:
+                    url = item['url']
+                    clean_id = item['id']
+                    tipo = "VIDEO" if ".mp4" in url else "FOTO"
                     
-                    if found_keyword:
-                        # Usa .title() per dare la lettera maiuscola ai Nomi
-                        dida = f"Storia su {found_keyword.title()}"
-                
-                send_telegram(dida, url, tipo == "VIDEO")
-                ids_to_add.append(clean_id)
-                time.sleep(3)
+                    dida = "Storia"
 
-        browser.close()
+                    # --- MODIFICA OCR GENTILE ---
+                    if tipo == "FOTO" and OCR_KEY:
+                        txt = ocr_scan(url)
+                        # Cerca quale parola chiave specifica è stata trovata
+                        found_keyword = next((k for k in PAROLE_CHIAVE if k in txt), None)
+                        
+                        if found_keyword:
+                            # Usa .title() per dare la lettera maiuscola ai Nomi
+                            dida = f"Storia su {found_keyword.title()}"
+                    
+                    send_telegram(dida, url, tipo == "VIDEO")
+                    ids_to_add.append(clean_id)
+                    time.sleep(3)
+
+            # Chiudi browser e context PRIMA di uscire dal with
+            try:
+                context.close()
+                browser.close()
+            except:
+                pass
 
         if ids_to_add:
             # Uniamo la vecchia history con i nuovi ID
@@ -444,7 +449,7 @@ def run():
                     f.write(f"{sid}\n")
             print(f"\n💾 History aggiornata: {len(updated_history)} elementi totali")
 
-                # === HEALTH CHECK INTELLIGENTE ===
+        # === HEALTH CHECK INTELLIGENTE ===
         print("\n🔍 Health Check dettagliato...")
         
         # Notifiche solo per problemi reali, non per profili senza storie
@@ -513,6 +518,11 @@ def run():
         
         print(f"\n✅ BOT COMPLETATO")
         print(f"📊 Riepilogo: {num_nuove} storie processate, {len(ids_to_add)} aggiunte a history")
+        
+    except Exception as e:
+        print(f"💀 Errore fatale nel run(): {e}")
+        emergency_cleanup(browser, context)
+        raise
 
 if __name__ == "__main__":
     run()
