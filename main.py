@@ -110,9 +110,27 @@ def check_storiesviewer(page):
             print(f"⚠️ Errore fase ricerca: {e}")
             return links, status, error_details
 
-        # 3. Attesa Risultati con timeout separato
+        # 3. Attesa Risultati con gestione del caricamento lento e errori server
         try:
-            # Prima controlla se appare messaggio "nessuna storia"
+            # Aspetta che le scritte "Caricamento" o "Loading" scompaiano
+            try:
+                page.wait_for_selector('text="Caricamento", text="Loading"', state='hidden', timeout=30000)
+                print("✅ Caricamento completato.")
+            except:
+                print("ℹ️ Nessun indicatore di caricamento rilevato")
+                pass
+            
+            # Controlla se c'è il messaggio di errore del server
+            try:
+                page.wait_for_selector('text="Sorry, the server is temporarily unavailable"', timeout=5000)
+                status = "SERVER_UNAVAILABLE"
+                error_details = "Server temporaneamente non disponibile"
+                print("ℹ️ StoriesViewer: Server temporaneamente non disponibile (si risolverà da solo)")
+                return links, status, error_details
+            except:
+                pass  # Nessun messaggio di errore
+            
+            # Controlla se appare messaggio "nessuna storia"
             try:
                 page.wait_for_selector('text="No stories found", text="Nessuna storia", text="not found"', timeout=5000)
                 status = "NO_STORIES"
@@ -122,17 +140,18 @@ def check_storiesviewer(page):
             except:
                 pass
                 
-            # Poi attende i risultati
-            page.wait_for_selector('a:has-text("Download HD"), .story-item, .stories-container', timeout=15000)
+            # Attende i risultati (timeout più lungo per siti lenti)
+            page.wait_for_selector('a:has-text("Download HD"), .story-item, .stories-container', timeout=30000)
             print("✨ Elementi storie trovati!")
             
         except Exception as e:
+            # Se timeout, potrebbero esserci già elementi? Continuiamo a estrarre
             status = "TIMEOUT"
             error_details = f"Timeout caricamento risultati: {str(e)[:100]}"
-            print("⚠️ Timeout caricamento storie")
-            # Continua comunque per vedere se ci sono link
-            
-        # 4. Estrazione link
+            print("⚠️ Timeout caricamento storie, procedo con estrazione eventuali link...")
+            # Non usciamo, continuiamo a cercare link
+        
+        # 4. Estrazione link (anche in caso di timeout, se ci sono elementi)
         raw_elements = page.query_selector_all('a[href*="media.php"]')
         
         for el in raw_elements:
@@ -152,8 +171,14 @@ def check_storiesviewer(page):
             status = "SUCCESS"
             print(f"✅ StoriesViewer: {len(links)} link trovati.")
         else:
-            status = "NO_LINKS"
-            print("⚠️ StoriesViewer: Sito caricato ma nessun link estratto")
+            # Se non abbiamo link, ma lo status è ancora UNKNOWN (non è stato impostato da altri casi)
+            if status == "UNKNOWN":
+                status = "NO_LINKS"
+                print("⚠️ StoriesViewer: Sito caricato ma nessun link estratto")
+            elif status == "TIMEOUT":
+                # Manteniamo il TIMEOUT, ma se ci sono link li abbiamo già presi
+                if not links:
+                    print("⚠️ StoriesViewer: Timeout e nessun link estratto")
             
         return links, status, error_details
         
@@ -335,6 +360,7 @@ def run():
         elif storiesviewer_status == "INPUT_ERROR":
             send_alert = True
             alert_message += f"🔴 STORIESVIEWER CAMBIO LAYOUT: Input/lente non trovati\n"
+        # NOTA: SERVER_UNAVAILABLE non genera notifica - si risolve da solo
         
         # Analisi IQSaved
         if iqsaved_status == "HTTP_ERROR":
@@ -368,7 +394,9 @@ def run():
         print(f"   IQSaved: {iqsaved_status} - Error: {iqsaved_error}")
         
         # Allarme critico solo se entrambi i siti falliscono completamente
-        if len(tutti_i_link) == 0 and storiesviewer_status not in ["NO_STORIES", "UNKNOWN"] and iqsaved_status not in ["NO_STORIES", "UNKNOWN"]:
+        # Escludiamo SERVER_UNAVAILABLE che è temporaneo
+        critical_statuses = ["NO_STORIES", "UNKNOWN", "SERVER_UNAVAILABLE"]
+        if len(tutti_i_link) == 0 and storiesviewer_status not in critical_statuses and iqsaved_status not in ["NO_STORIES", "UNKNOWN"]:
             print("🚨 ALLARME CRITICO: Nessun sito funziona!")
             critical_msg = f"🔴 CRITICO: Nessun sito funziona per {IG_USER}\n\n"
             critical_msg += f"StoriesViewer: {storiesviewer_status} ({storiesviewer_error})\n"
