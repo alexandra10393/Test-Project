@@ -39,6 +39,15 @@ jobs:
         python-version: '3.9'
         cache: 'pip'
 
+    - name: Cache Playwright browsers
+      if: steps.check-time.outputs.run_bot == 'true'
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/ms-playwright
+        key: ${{ runner.os }}-playwright-${{ hashFiles('requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-playwright-
+
     - name: Installazione Dipendenze
       if: steps.check-time.outputs.run_bot == 'true'
       run: |
