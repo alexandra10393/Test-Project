@@ -4,7 +4,8 @@ import re
 import json
 import requests
 import shutil
-from datetime import datetime
+import glob
+from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 from urllib.parse import unquote
 from requests.adapters import HTTPAdapter
@@ -40,6 +41,77 @@ TELEGRAM_SESSION = create_telegram_session()
 # File per tracciare fallimenti
 FAILURE_FILE = "failure_tracker.json"
 PERFORMANCE_FILE = "performance_log.txt"
+ERROR_LOG_FILE = "error_log.txt"
+
+# ===============================
+# CLEANUP AUTOMATICO LOG
+# ===============================
+
+def cleanup_old_logs(days_to_keep=7, max_performance_entries=1000):
+    """Pulisce file log vecchi e mantiene dimensioni gestibili"""
+    print("🧹 Pulizia log in corso...")
+    
+    # 1. Pulizia file per data
+    log_files = [PERFORMANCE_FILE, FAILURE_FILE, ERROR_LOG_FILE, "debug_screenshot.png"]
+    
+    cutoff_time = time.time() - (days_to_keep * 86400)
+    
+    for log_file in log_files:
+        if os.path.exists(log_file):
+            try:
+                file_mtime = os.path.getmtime(log_file)
+                if file_mtime < cutoff_time:
+                    os.remove(log_file)
+                    print(f"  ✅ Rimosso log vecchio: {log_file}")
+            except Exception as e:
+                print(f"  ⚠️ Errore rimozione {log_file}: {e}")
+    
+    # 2. Limita dimensioni performance_log.txt
+    if os.path.exists(PERFORMANCE_FILE):
+        try:
+            with open(PERFORMANCE_FILE, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            if len(lines) > max_performance_entries:
+                with open(PERFORMANCE_FILE, "w", encoding="utf-8") as f:
+                    # Mantieni ultime 1000 righe
+                    f.writelines(lines[-max_performance_entries:])
+                print(f"  📉 Performance log troncato: {len(lines)} → {max_performance_entries} righe")
+        except Exception as e:
+            print(f"  ⚠️ Errore cleanup performance log: {e}")
+    
+    # 3. Limita dimensioni failure_tracker.json
+    if os.path.exists(FAILURE_FILE):
+        try:
+            with open(FAILURE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            # Mantieni solo fallimenti ultime 48 ore
+            if "failures" in data:
+                cutoff_date = (datetime.now() - timedelta(hours=48)).isoformat()
+                old_keys = [k for k, v in data["failures"].items() 
+                           if v.get("time", "") < cutoff_date]
+                
+                for key in old_keys:
+                    del data["failures"][key]
+                
+                if old_keys:
+                    print(f"  🗑️  Rimossi {len(old_keys)} fallimenti vecchi")
+                    with open(FAILURE_FILE, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            print(f"  ⚠️ Errore cleanup failure tracker: {e}")
+    
+    # 4. Rimuovi screenshot debug vecchi
+    try:
+        for screenshot in glob.glob("debug_*.png"):
+            if os.path.getmtime(screenshot) < cutoff_time:
+                os.remove(screenshot)
+                print(f"  🖼️  Rimosso screenshot vecchio: {screenshot}")
+    except:
+        pass
+    
+    print("✅ Pulizia log completata")
 
 # ===============================
 # FUNZIONI DI TRACKING E MONITORAGGIO
@@ -49,22 +121,14 @@ def track_performance(phase, duration):
     """Logga performance per fase"""
     try:
         with open(PERFORMANCE_FILE, "a", encoding="utf-8") as f:
-            f.write(f"{datetime.now().isoformat()}|{phase}|{duration:.2f}\n")
-        
-        # Mantieni file sotto 1000 righe
-        with open(PERFORMANCE_FILE, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        
-        if len(lines) > 1000:
-            with open(PERFORMANCE_FILE, "w", encoding="utf-8") as f:
-                f.writelines(lines[-500:])
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            f.write(f"{timestamp}|{phase}|{duration:.2f}\n")
     except Exception as e:
         print(f"⚠️ Errore log performance: {e}")
 
 def track_failure(site, status):
     """Traccia fallimenti consecutivi per ogni sito"""
     try:
-        # Carica dati esistenti
         if os.path.exists(FAILURE_FILE):
             with open(FAILURE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
@@ -72,32 +136,26 @@ def track_failure(site, status):
             data = {
                 "failures": {},
                 "consecutive_fails": {},
-                "last_success": {}
+                "last_success": {},
+                "stats": {"total_runs": 0, "successful_runs": 0}
             }
         
         now = datetime.now().isoformat()
+        data["stats"]["total_runs"] = data["stats"].get("total_runs", 0) + 1
         
-        # Gestione fallimenti consecutivi
         if status in ["SUCCESS", "NO_STORIES", "SERVER_UNAVAILABLE"]:
-            # Reset fallimenti consecutivi
             data["consecutive_fails"][site] = 0
             if status == "SUCCESS":
                 data["last_success"][site] = now
+                data["stats"]["successful_runs"] = data["stats"].get("successful_runs", 0) + 1
         else:
-            # Incrementa fallimenti consecutivi
             current_fails = data["consecutive_fails"].get(site, 0)
             data["consecutive_fails"][site] = current_fails + 1
             
-            # Logga fallimento
-            fail_key = f"{site}_{int(time.time())}"
-            data["failures"][fail_key] = {
-                "site": site, 
-                "status": status, 
-                "time": now,
-                "consecutive": current_fails + 1
-            }
+            # Log errore dettagliato
+            with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"{now}|{site}|{status}|{current_fails + 1}\n")
         
-        # Salva dati
         with open(FAILURE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         
@@ -118,7 +176,7 @@ def get_consecutive_fails(site):
         pass
     return 0
 
-def retry_with_backoff(func, max_retries=2, *args, **kwargs):
+def retry_with_backoff(func, max_retries=1, *args, **kwargs):
     """Esegue retry con backoff esponenziale per errori transienti"""
     import time
     
@@ -152,19 +210,16 @@ def validate_links(links):
     invalid_count = 0
     
     for link in links:
-        # Controlli di validità
         if not link or not isinstance(link, str):
             invalid_count += 1
             continue
         
         link = link.strip()
         
-        # Controlli stringa
         if len(link) < 20:
             invalid_count += 1
             continue
         
-        # Controlla pattern comuni
         instagram_patterns = [
             "cdninstagram.com",
             "scontent.cdninstagram.com",
@@ -173,19 +228,9 @@ def validate_links(links):
         ]
         
         if not any(pattern in link for pattern in instagram_patterns):
-            print(f"⚠️ Link sospetto (non Instagram): {link[:60]}...")
             invalid_count += 1
             continue
         
-        # Controlla caratteri strani
-        if " " in link or "\n" in link or "\t" in link:
-            # Prova a correggere
-            link = link.replace("\n", "").replace("\t", "")
-            if " " in link:
-                invalid_count += 1
-                continue
-        
-        # Controlla formato URL
         if not link.startswith(("http://", "https://")):
             invalid_count += 1
             continue
@@ -195,7 +240,6 @@ def validate_links(links):
     if invalid_count > 0:
         print(f"⚠️ Validazione: rimossi {invalid_count} link malformati")
     
-    # Rimuovi duplicati mantenendo l'ordine
     seen = set()
     unique_links = []
     for link in valid_links:
@@ -217,13 +261,12 @@ def check_disk_space(min_mb=5):
         return True
     except Exception as e:
         print(f"⚠️ Impossibile controllare spazio disco: {e}")
-        return True  # Se non può controllare, procedi comunque
+        return True
 
 # ===============================
 # CONFIGURAZIONE
 # ===============================
 
-# Usa le variabili d'ambiente (Secrets)
 IG_USER = os.environ.get("IG_USER") 
 
 KEYWORD_LIST = [
@@ -239,7 +282,6 @@ if not PAROLE_CHIAVE:
 SOGLIA_ALLUVIONE = 150   
 MAX_HISTORY = 300      
 
-# RECUPERO CHIAVI
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 OCR_KEY = os.environ.get("OCR_KEY", "")
@@ -255,7 +297,6 @@ def get_clean_id(url):
             return url.split("filename=")[1].split("&")[0]
         if "/media/" in url:
             return url.split("/media/")[1].split("?")[0]
-        # Estrai ultima parte dell'URL
         clean = url.split("/")[-1].split("?")[0]
         return clean if len(clean) > 5 else url
     except:
@@ -266,7 +307,6 @@ def send_telegram(text, media_url=None, is_video=False):
     api_url = f"https://api.telegram.org/bot{TOKEN}/"
     method = "sendVideo" if is_video else "sendPhoto"
     
-    # Limita lunghezza testo per log
     log_text = text[:80] + "..." if len(text) > 80 else text
     print(f"✈️ Invio Telegram: {log_text}")
     
@@ -275,7 +315,6 @@ def send_telegram(text, media_url=None, is_video=False):
             payload = {"chat_id": CHAT_ID, "caption": text, "parse_mode": "HTML"}
             files_key = 'video' if is_video else 'photo'
             
-            # Usa sessione con pooling
             response = TELEGRAM_SESSION.post(
                 api_url + method, 
                 data=payload, 
@@ -283,7 +322,6 @@ def send_telegram(text, media_url=None, is_video=False):
                 timeout=120
             )
             response.raise_for_status()
-            print(f"✅ Media inviato: {response.status_code}")
             
         else:
             response = TELEGRAM_SESSION.post(
@@ -296,7 +334,6 @@ def send_telegram(text, media_url=None, is_video=False):
     except Exception as e:
         print(f"❌ Errore invio Telegram: {e}")
         
-        # Fallback con sessione semplice
         try:
             requests.post(
                 api_url + "sendMessage", 
@@ -307,9 +344,8 @@ def send_telegram(text, media_url=None, is_video=False):
                 },
                 timeout=30
             )
-            print("✅ Fallback inviato (solo testo)")
-        except Exception as e2:
-            print(f"❌ Fallback fallito: {e2}")
+        except:
+            pass
 
 def ocr_scan(image_url):
     """Esegue OCR su immagine"""
@@ -334,11 +370,11 @@ def ocr_scan(image_url):
     return ""
 
 # ===============================
-# MOTORI DI SCRAPING
+# MOTORI DI SCRAPING OTTIMIZZATI
 # ===============================
 
 def check_storiesviewer(page):
-    """Scarica storie da StoriesViewer.net con timeout dinamici"""
+    """Scarica storie da StoriesViewer.net con timeout ottimizzati"""
     print(f"⏩ Controllo StoriesViewer.net...")
     
     target_url = "https://storiesviewer.net/it/"
@@ -347,19 +383,17 @@ def check_storiesviewer(page):
     error_details = ""
     start_time = time.time()
     
-    # Calcola timeout dinamico basato su fallimenti consecutivi
+    # TIMEOUT OTTIMIZZATI (basati sul tuo run di 23s)
     consecutive_fails = get_consecutive_fails("StoriesViewer")
-    base_timeout = 60000  # 60 secondi base
+    base_timeout = 30000  # Ridotto da 60000 a 30000 (30s)
     
     if consecutive_fails >= 2:
-        # Riduci timeout per fallimenti consecutivi
-        adjusted_timeout = max(30000, base_timeout - (consecutive_fails * 10000))
+        adjusted_timeout = max(15000, base_timeout - (consecutive_fails * 5000))
         print(f"⚠️ {consecutive_fails} fallimenti consecutivi, timeout ridotto a {adjusted_timeout/1000:.0f}s")
     else:
         adjusted_timeout = base_timeout
     
     try:
-        # 1. Carica Homepage
         response = page.goto(target_url, timeout=adjusted_timeout, wait_until="domcontentloaded")
         
         if response.status != 200:
@@ -369,23 +403,20 @@ def check_storiesviewer(page):
             track_failure("StoriesViewer", status)
             return links, status, error_details
         
-        # Cookie banner
         try:
-            page.click("button:has-text('Consent'), .fc-cta-consent", timeout=3000)
+            page.click("button:has-text('Consent'), .fc-cta-consent", timeout=2000)
         except:
             pass
         
-        # 2. Ricerca utente
         try:
             search_input = page.locator('input[name="url"], input[type="text"]').first
-            search_input.wait_for(state="visible", timeout=10000)
+            search_input.wait_for(state="visible", timeout=8000)  # Ridotto da 10000
             search_input.click()
             search_input.fill(IG_USER)
-            time.sleep(1)
+            time.sleep(0.5)  # Ridotto da 1s
             
-            # Clicca lente di ricerca
             search_btn = page.locator('button[type="submit"], button:has(i), button.btn-default').first
-            search_btn.wait_for(state="visible", timeout=5000)
+            search_btn.wait_for(state="visible", timeout=4000)  # Ridotto da 5000
             search_btn.click()
             print("🖱️ Lente cliccata!")
             
@@ -396,18 +427,16 @@ def check_storiesviewer(page):
             track_failure("StoriesViewer", status)
             return links, status, error_details
 
-        # 3. Attesa risultati con gestione avanzata
         try:
-            # Attesa caricamento iniziale
             try:
-                page.wait_for_selector('text="Caricamento", text="Loading"', state='hidden', timeout=30000)
+                page.wait_for_selector('text="Caricamento", text="Loading"', state='hidden', timeout=15000)  # Ridotto da 30000
                 print("✅ Caricamento completato.")
             except:
                 print("ℹ️ Nessun indicatore di caricamento")
+                pass
             
-            # Controlla errore server
             try:
-                page.wait_for_selector('text="Sorry, the server is temporarily unavailable"', timeout=5000)
+                page.wait_for_selector('text="Sorry, the server is temporarily unavailable"', timeout=3000)  # Ridotto da 5000
                 status = "SERVER_UNAVAILABLE"
                 error_details = "Server temporaneamente non disponibile"
                 print("ℹ️ StoriesViewer: Server temporaneamente non disponibile")
@@ -416,9 +445,8 @@ def check_storiesviewer(page):
             except:
                 pass
             
-            # Controlla "nessuna storia"
             try:
-                page.wait_for_selector('text="No stories found", text="Nessuna storia", text="not found"', timeout=5000)
+                page.wait_for_selector('text="No stories found", text="Nessuna storia", text="not found"', timeout=3000)  # Ridotto da 5000
                 status = "NO_STORIES"
                 error_details = "Profilo senza storie o privato"
                 print("ℹ️ StoriesViewer: Nessuna storia trovata")
@@ -426,18 +454,15 @@ def check_storiesviewer(page):
                 return links, status, error_details
             except:
                 pass
-            
-            # Attesa risultati principali
-            page.wait_for_selector('a:has-text("Download HD"), .story-item, .stories-container', timeout=30000)
+                
+            page.wait_for_selector('a:has-text("Download HD"), .story-item, .stories-container', timeout=15000)  # Ridotto da 30000
             print("✨ Elementi storie trovati!")
             
         except Exception as e:
             status = "TIMEOUT"
             error_details = f"Timeout caricamento: {str(e)[:100]}"
             print("⚠️ Timeout caricamento storie")
-            # Continua comunque per estrazione
         
-        # 4. Estrazione link
         raw_elements = page.query_selector_all('a[href*="media.php"]')
         
         for el in raw_elements:
@@ -451,7 +476,6 @@ def check_storiesviewer(page):
                 except:
                     continue
         
-        # Validazione link
         links = validate_links(links)
         
         elapsed = time.time() - start_time
@@ -467,9 +491,8 @@ def check_storiesviewer(page):
                 print(f"⚠️ StoriesViewer: nessun link in {elapsed:.1f}s")
             track_failure("StoriesViewer", status)
             
-        # Warning per lentezza
-        if elapsed > 45000:  # 45 secondi
-            print(f"⚠️ ATTENZIONE: StoriesViewer molto lento ({elapsed:.1f}s)")
+        if elapsed > 25000:  # Warning se > 25s
+            print(f"⚠️ ATTENZIONE: StoriesViewer lento ({elapsed:.1f}s)")
             
         return links, status, error_details
         
@@ -481,7 +504,7 @@ def check_storiesviewer(page):
         return links, status, error_details
 
 def check_iqsaved(page):
-    """Scarica storie da IQSaved.com"""
+    """Scarica storie da IQSaved.com con timeout ottimizzati"""
     print(f"🔎 Controllo IQSAVED per {IG_USER}...")
     
     target_url = f"https://iqsaved.com/it/viewer/{IG_USER}/"
@@ -490,12 +513,11 @@ def check_iqsaved(page):
     error_details = ""
     start_time = time.time()
     
-    # Timeout dinamico
     consecutive_fails = get_consecutive_fails("IQSaved")
-    base_timeout = 60000
+    base_timeout = 30000  # Ridotto da 60000
     
     if consecutive_fails >= 2:
-        adjusted_timeout = max(30000, base_timeout - (consecutive_fails * 10000))
+        adjusted_timeout = max(15000, base_timeout - (consecutive_fails * 5000))
         print(f"⚠️ {consecutive_fails} fallimenti consecutivi, timeout ridotto a {adjusted_timeout/1000:.0f}s")
     else:
         adjusted_timeout = base_timeout
@@ -510,19 +532,16 @@ def check_iqsaved(page):
             track_failure("IQSaved", status)
             return links, status, error_details
             
-        time.sleep(3)
+        time.sleep(3)  # Mantenuto per caricamento JavaScript
         
-        # Cookie banner
         try:
-            page.click("button.fc-cta-consent, button.primary-button, .cookie-agree", timeout=3000)
+            page.click("button.fc-cta-consent, button.primary-button, .cookie-agree", timeout=2000)
         except:
             pass
 
-        # Scroll per caricare tutto
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        time.sleep(2)
+        time.sleep(2)  # Ridotto da 3
         
-        # Controlla "nessuna storia"
         page_content = page.content()
         
         if "No stories found" in page_content or "Nessuna storia" in page_content:
@@ -532,11 +551,9 @@ def check_iqsaved(page):
             track_failure("IQSaved", status)
             return links, status, error_details
             
-        # Estrazione link
         raw_links = re.findall(r'https://cdn\.iqsaved\.com/[^"\']+', page_content)
         links = [l.replace('&amp;', '&') for l in raw_links]
         
-        # Validazione
         links = validate_links(links)
         
         elapsed = time.time() - start_time
@@ -600,17 +617,17 @@ def emergency_cleanup(browser=None, context=None):
     
     import gc
     gc.collect()
-    print("✅ Cleanup completato")
 
 # ===============================
-# FUNZIONE PRINCIPALE
+# FUNZIONE PRINCIPALE OTTIMIZZATA
 # ===============================
 
 def run():
     """Funzione principale del bot"""
+    cleanup_old_logs(7)  # Pulisce log vecchi di 7 giorni
+    
     print("🚀 Avvio Bot Ibrido Avanzato...")
     
-    # Timer totale
     start_total = time.time()
     phase_timers = {
         "setup": 0,
@@ -620,15 +637,12 @@ def run():
         "telegram": 0
     }
     
-    # Variabili per cleanup
     browser = None
     context = None
     
     try:
-        # FASE 0: Setup
         phase_start = time.time()
         
-        # Carica history
         seen_ids = []
         if os.path.exists("history.txt"):
             with open("history.txt", "r", encoding="utf-8") as f:
@@ -639,9 +653,8 @@ def run():
         
         phase_timers["setup"] = time.time() - phase_start
         
-        # Avvia Playwright
         with sync_playwright() as p:
-            # Browser ottimizzato per performance
+            # BROWSER OTTIMIZZATO PER VELOCITÀ
             browser = p.chromium.launch(
                 headless=True,
                 args=[
@@ -660,10 +673,12 @@ def run():
                     '--single-process',
                     '--disable-features=site-per-process,TranslateUI',
                     '--disable-blink-features=AutomationControlled',
+                    '--disable-background-timer-throttling',
+                    '--disable-renderer-backgrounding',
+                    '--disable-backgrounding-occluded-windows',
                 ]
             )
             
-            # Context
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
                 viewport={'width': 1280, 'height': 800}
@@ -671,7 +686,7 @@ def run():
             
             page = context.new_page()
             
-            # FASE 1: StoriesViewer con retry
+            # FASE 1: StoriesViewer
             phase_start = time.time()
             try:
                 links_viewer, storiesviewer_status, storiesviewer_error = retry_with_backoff(
@@ -686,7 +701,7 @@ def run():
             
             phase_timers["storiesviewer"] = time.time() - phase_start
             
-            # FASE 2: IQSaved (fallback)
+            # FASE 2: IQSaved (solo se necessario)
             links_iq, iqsaved_status, iqsaved_error = [], "NOT_TESTED", ""
             phase_start = time.time()
             
@@ -704,21 +719,19 @@ def run():
             
             phase_timers["iqsaved"] = time.time() - phase_start
             
-            # Chiudi browser prima di continuare
+            # Chiudi browser ASAP
             try:
                 context.close()
                 browser.close()
             except:
                 pass
         
-        # Processa link
+        # PROCESSING
         phase_start = time.time()
         
-        # Validazione finale
         tutti_i_link = validate_links(all_links)
         print(f"📦 Totale link validi: {len(tutti_i_link)}")
         
-        # Identifica nuove storie
         storie_da_processare = []
         for url in tutti_i_link:
             clean_id = get_clean_id(url)
@@ -729,7 +742,7 @@ def run():
         
         phase_timers["processing"] = time.time() - phase_start
         
-        # FASE 3: Invio Telegram
+        # INVIO TELEGRAM
         phase_start = time.time()
         
         if num_nuove > SOGLIA_ALLUVIONE:
@@ -743,14 +756,11 @@ def run():
                 url = item['url']
                 clean_id = item['id']
                 
-                # Determina tipo
                 is_video = ".mp4" in url.lower() or "video" in url.lower()
                 tipo = "VIDEO" if is_video else "FOTO"
                 
-                # Didascalia base
                 dida = f"Storia {i+1}/{num_nuove}"
                 
-                # OCR per foto
                 if tipo == "FOTO" and OCR_KEY:
                     txt = ocr_scan(url)
                     if txt:
@@ -758,23 +768,20 @@ def run():
                         if found_keyword:
                             dida = f"Storia su {found_keyword.title()}"
                 
-                # Invio
                 send_telegram(dida, url, is_video)
                 ids_to_add.append(clean_id)
                 
-                # Sleep adattivo
                 if i < len(storie_da_processare) - 1:
-                    sleep_time = 2 + (i * 0.5)  # Incrementa progressivamente
-                    sleep_time = min(sleep_time, 5)  # Max 5 secondi
+                    sleep_time = 1.5 + (i * 0.3)  # Sleep progressivo ridotto
+                    sleep_time = min(sleep_time, 4)
                     time.sleep(sleep_time)
         
         phase_timers["telegram"] = time.time() - phase_start
         
-        # Salva history
+        # SALVA HISTORY
         if ids_to_add and check_disk_space():
             updated_history = seen_ids + ids_to_add
             
-            # Limita history
             if len(updated_history) > MAX_HISTORY:
                 updated_history = updated_history[-MAX_HISTORY:]
                 print(f"📊 History troncata a {MAX_HISTORY} elementi")
@@ -786,13 +793,12 @@ def run():
             
             print(f"💾 History aggiornata: {len(updated_history)} elementi")
         
-        # HEALTH CHECK INTELLIGENTE
+        # HEALTH CHECK
         print("\n🔍 Health Check dettagliato...")
         
         send_alert = False
         alert_message = ""
         
-        # Analisi StoriesViewer
         if storiesviewer_status == "HTTP_ERROR":
             send_alert = True
             alert_message += f"🔴 STORIESVIEWER DOWN: {storiesviewer_error}\n"
@@ -807,7 +813,6 @@ def run():
             send_alert = True
             alert_message += f"🔴 STORIESVIEWER LAYOUT CAMBIATO\n"
         
-        # Analisi IQSaved
         if iqsaved_status == "HTTP_ERROR":
             send_alert = True
             alert_message += f"🔴 IQSAVED DOWN: {iqsaved_error}\n"
@@ -815,7 +820,6 @@ def run():
             send_alert = True
             alert_message += f"🔴 IQSAVED CRASH: {iqsaved_error}\n"
         
-        # Invia alert se necessario
         if send_alert:
             alert_message += f"\n📊 CONTESTO:\n"
             alert_message += f"• Profilo: {IG_USER}\n"
@@ -831,12 +835,10 @@ def run():
             
             send_telegram(f"🚨 ALLARME SITI\n\n{alert_message}")
         
-        # Log status
         print(f"\n📋 Riepilogo Status:")
         print(f"   StoriesViewer: {storiesviewer_status} ({len(links_viewer)} link)")
         print(f"   IQSaved: {iqsaved_status} ({len(links_iq)} link)")
         
-        # Allarme critico se entrambi down
         critical_statuses = ["NO_STORIES", "UNKNOWN", "SERVER_UNAVAILABLE"]
         if (len(tutti_i_link) == 0 and 
             storiesviewer_status not in critical_statuses and 
@@ -850,7 +852,7 @@ def run():
                 f"Intervento richiesto!"
             )
         
-        # Analisi performance finale
+        # ANALISI PERFORMANCE
         total_time = time.time() - start_total
         print(f"\n⏱️ ANALISI PERFORMANCE:")
         print(f"  Totale: {total_time:.1f}s")
@@ -860,13 +862,12 @@ def run():
                 percent = (t / total_time) * 100
                 print(f"  {phase}: {t:.1f}s ({percent:.1f}%)")
         
-        # Warning se troppo lento
-        if total_time > 120:
+        if total_time > 60:
             slowest_phase = max(phase_timers, key=phase_timers.get)
             print(f"⚠️ AVVISO: Bot lento ({total_time:.1f}s)")
             print(f"   Fase più lenta: {slowest_phase} ({phase_timers[slowest_phase]:.1f}s)")
             
-            if total_time > 180:  # 3 minuti
+            if total_time > 90:
                 send_telegram(
                     f"⚠️ Bot estremamente lento: {total_time:.1f}s\n"
                     f"Fase critica: {slowest_phase}\n"
@@ -880,7 +881,6 @@ def run():
         print(f"💀 ERRORE FATALE nel run(): {e}")
         emergency_cleanup(browser, context)
         
-        # Notifica errore fatale
         try:
             send_telegram(
                 f"💀 ERRORE FATALE BOT\n\n"
