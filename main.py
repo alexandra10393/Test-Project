@@ -71,105 +71,154 @@ def check_storiesviewer(page):
     print(f"⏩ Controllo StoriesViewer.net...")
     target_url = "https://storiesviewer.net/it/"
     links = []
+    status = "UNKNOWN"
+    error_details = ""
     
     try:
         # 1. Carica la Home
-        page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
+        response = page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
         
-        # Gestione Cookie (se presente)
+        # Controlla status HTTP
+        if response.status != 200:
+            status = "HTTP_ERROR"
+            error_details = f"Status {response.status}"
+            print(f"❌ StoriesViewer HTTP Error: {response.status}")
+            return links, status, error_details
+        
+        # Gestione Cookie
         try:
             page.click("button:has-text('Consent'), .fc-cta-consent", timeout=3000)
         except: pass
         
         # 2. Ricerca
         try:
-            # Cerca la barra di input
             search_input = page.locator('input[name="url"], input[type="text"]').first
             search_input.wait_for(state="visible", timeout=10000)
             search_input.click()
             search_input.fill(IG_USER)
             time.sleep(1)
             
-            # CLICCARE LA LENTE (Modifica Cruciale)
-            print("🔍 Cerco il tasto lente...")
-            
-            # Proviamo diversi selettori comuni per il tasto cerca con lente
-            # 1. Bottone generico di submit
-            # 2. Bottone che contiene un tag 'i' (icona)
-            # 3. Bottone con classe 'btn-default' (comune in questi script)
+            # Clicca lente
             search_btn = page.locator('button[type="submit"], button:has(i), button.btn-default').first
-            
             search_btn.wait_for(state="visible", timeout=5000)
             search_btn.click()
             print("🖱️ Lente cliccata!")
             
         except Exception as e:
-            print(f"⚠️ Errore fase ricerca (Lente non trovata o non cliccabile): {e}")
-            return []
+            status = "INPUT_ERROR"
+            error_details = f"Input non trovato: {str(e)[:100]}"
+            print(f"⚠️ Errore fase ricerca: {e}")
+            return links, status, error_details
 
-        # 3. Attesa Risultati
-        print("⏳ Attendo caricamento storie...")
-        # Aspettiamo il tasto "Download HD" che hai identificato tu
+        # 3. Attesa Risultati con timeout separato
         try:
-            page.wait_for_selector('a:has-text("Download HD")', timeout=20000)
-            print("✨ Tasti 'Download HD' apparsi!")
-        except:
-            print("⚠️ Timeout: Nessun risultato trovato o caricamento lento.")
-            return []
+            # Prima controlla se appare messaggio "nessuna storia"
+            try:
+                page.wait_for_selector('text="No stories found", text="Nessuna storia", text="not found"', timeout=5000)
+                status = "NO_STORIES"
+                error_details = "Profilo senza storie o privato"
+                print("ℹ️ StoriesViewer: Nessuna storia trovata per questo profilo")
+                return links, status, error_details
+            except:
+                pass
+                
+            # Poi attende i risultati
+            page.wait_for_selector('a:has-text("Download HD"), .story-item, .stories-container', timeout=15000)
+            print("✨ Elementi storie trovati!")
             
-        # 4. Estrazione e Decodifica
-        # Cerchiamo tutti i link che contengono "media.php"
+        except Exception as e:
+            status = "TIMEOUT"
+            error_details = f"Timeout caricamento risultati: {str(e)[:100]}"
+            print("⚠️ Timeout caricamento storie")
+            # Continua comunque per vedere se ci sono link
+            
+        # 4. Estrazione link
         raw_elements = page.query_selector_all('a[href*="media.php"]')
         
         for el in raw_elements:
             raw_url = el.get_attribute("href")
-            
-            # Il link è tipo: media.php?media=https%3A%2F%2F...
             if raw_url and "media=" in raw_url:
                 try:
-                    # Estraiamo la parte dopo media=
                     encoded_part = raw_url.split("media=")[1].split("&")[0]
-                    # Decodifichiamo (trasforma %3A in : e %2F in /)
                     clean_url = unquote(encoded_part)
-                    
                     if "cdninstagram.com" in clean_url:
                         links.append(clean_url)
                 except:
                     continue
 
         links = list(dict.fromkeys(links))
-        print(f"✅ StoriesViewer: {len(links)} link trovati e decodificati.")
-        return links
+        
+        if links:
+            status = "SUCCESS"
+            print(f"✅ StoriesViewer: {len(links)} link trovati.")
+        else:
+            status = "NO_LINKS"
+            print("⚠️ StoriesViewer: Sito caricato ma nessun link estratto")
+            
+        return links, status, error_details
         
     except Exception as e:
+        status = "CRASH"
+        error_details = f"Eccezione generale: {str(e)[:150]}"
         print(f"❌ Errore StoriesViewer: {e}")
-        return []
+        return links, status, error_details
         
 # --- MOTORE 2: IQSAVED (Riserva) ---
 def check_iqsaved(page):
     print(f"🔎 Controllo IQSAVED per {IG_USER}...")
     target_url = f"https://iqsaved.com/it/viewer/{IG_USER}/"
     links = []
+    status = "UNKNOWN"
+    error_details = ""
+    
     try:
-        page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
+        response = page.goto(target_url, timeout=60000, wait_until="domcontentloaded")
+        
+        # Controlla status HTTP
+        if response.status != 200:
+            status = "HTTP_ERROR"
+            error_details = f"Status {response.status}"
+            print(f"❌ IQSaved HTTP Error: {response.status}")
+            return links, status, error_details
+            
         time.sleep(5)
         
+        # Cookie
         try:
             page.click("button.fc-cta-consent, button.primary-button, .cookie-agree", timeout=3000)
         except: pass
 
+        # Scrolling
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         time.sleep(3)
 
-        content = page.content()
-        raw_links = re.findall(r'https://cdn\.iqsaved\.com/[^"\']+', content)
+        # Controlla se ci sono messaggi di errore
+        page_content = page.content()
+        
+        if "No stories found" in page_content or "Nessuna storia" in page_content:
+            status = "NO_STORIES"
+            error_details = "Profilo senza storie o privato"
+            print("ℹ️ IQSaved: Nessuna storia trovata per questo profilo")
+            return links, status, error_details
+            
+        # Estrazione link
+        raw_links = re.findall(r'https://cdn\.iqsaved\.com/[^"\']+', page_content)
         links = [l.replace('&amp;', '&') for l in raw_links]
         
-        print(f"✅ IQSaved: trovati {len(links)} link.")
-        return list(dict.fromkeys(links))
+        if links:
+            status = "SUCCESS"
+            print(f"✅ IQSaved: trovati {len(links)} link.")
+        else:
+            status = "NO_LINKS"
+            print("⚠️ IQSaved: Sito caricato ma nessun link estratto")
+            
+        return list(dict.fromkeys(links)), status, error_details
+        
     except Exception as e:
+        status = "CRASH"
+        error_details = f"Eccezione: {str(e)[:150]}"
         print(f"❌ Errore IQSaved: {e}")
-        return []
+        return links, status, error_details
 
 def run():
     print("🚀 Avvio Bot Ibrido...")
@@ -197,15 +246,14 @@ def run():
         all_links = []
 
         # FASE 1: StoriesViewer (Sito Veloce con estrazione Proxy)
-        # Questo usa la nuova funzione check_storiesviewer che clicca la lente
-        links_viewer = check_storiesviewer(page)
+        links_viewer, storiesviewer_status, storiesviewer_error = check_storiesviewer(page)
         all_links.extend(links_viewer)
         
         # FASE 2: IQSaved (Riserva)
-        # Lo usiamo solo se il primo sito ha fallito o trovato meno di 5 storie
+        links_iq, iqsaved_status, iqsaved_error = [], "NOT_TESTED", ""
         if len(all_links) < 5:
             print("\n=== FASE 2: IQSAVED (FALLBACK) ===")
-            links_iq = check_iqsaved(page) # Usa la tua funzione IQSaved esistente
+            links_iq, iqsaved_status, iqsaved_error = check_iqsaved(page)
             all_links.extend(links_iq)
         
         # Unione liste (senza duplicati) e conteggio
@@ -265,13 +313,68 @@ def run():
                     f.write(f"{sid}\n")
             print(f"\n💾 History aggiornata: {len(updated_history)} elementi totali")
 
-        # === HEALTH CHECK CRITICO (Avviso di Fallimento Totale) ===
-        # Se la lista totale dei link trovati è vuota, significa che entrambi i siti hanno fallito
-        # o il profilo è diventato privato/vuoto.
-        if len(tutti_i_link) == 0:
-            print("🚨 NESSUN LINK TROVATO! Invio allarme...")
-            error_msg = f"🔴 ⚠️ ALLARME CRITICO: Il Bot non ha trovato ALCUNA storia per {IG_USER}.\n\nCause possibili:\n1. Il profilo è diventato PRIVATO.\n2. StoriesViewer e IQSaved sono entrambi GIÙ.\n3. Nessuna storia presente nelle ultime 24h."
-            send_telegram(error_msg)
+                # === HEALTH CHECK INTELLIGENTE ===
+        print("\n🔍 Health Check dettagliato...")
+        
+        # Notifiche solo per problemi reali, non per profili senza storie
+        send_alert = False
+        alert_message = ""
+        
+        # Analisi StoriesViewer
+        if storiesviewer_status == "HTTP_ERROR":
+            send_alert = True
+            alert_message += f"🔴 STORIESVIEWER DOWN: Errore HTTP {storiesviewer_error}\n"
+        elif storiesviewer_status == "CRASH":
+            send_alert = True
+            alert_message += f"🔴 STORIESVIEWER CRASH: {storiesviewer_error}\n"
+        elif storiesviewer_status == "TIMEOUT":
+            # Timeout è sospetto ma non sempre critico
+            if iqsaved_status != "SUCCESS":  # Se anche IQSaved non funziona
+                send_alert = True
+                alert_message += f"🟡 STORIESVIEWER TIMEOUT: Caricamento lento\n"
+        elif storiesviewer_status == "INPUT_ERROR":
+            send_alert = True
+            alert_message += f"🔴 STORIESVIEWER CAMBIO LAYOUT: Input/lente non trovati\n"
+        
+        # Analisi IQSaved
+        if iqsaved_status == "HTTP_ERROR":
+            send_alert = True
+            alert_message += f"🔴 IQSAVED DOWN: Errore HTTP {iqsaved_error}\n"
+        elif iqsaved_status == "CRASH":
+            send_alert = True
+            alert_message += f"🔴 IQSAVED CRASH: {iqsaved_error}\n"
+        
+        # Costruzione messaggio dettagliato
+        if send_alert:
+            # Aggiungi info di contesto
+            alert_message += f"\n📊 CONTESTO:\n"
+            alert_message += f"• Profilo: {IG_USER}\n"
+            alert_message += f"• StoriesViewer: {storiesviewer_status} ({len(links_viewer)} storie)\n"
+            alert_message += f"• IQSaved: {iqsaved_status} ({len(links_iq)} storie)\n"
+            alert_message += f"• Totale storie: {len(tutti_i_link)}\n"
+            alert_message += f"• Errori: {storiesviewer_error if storiesviewer_error else iqsaved_error}\n"
+            
+            if len(tutti_i_link) == 0:
+                alert_message += f"\n⚠️ CRITICO: Nessuna storia trovata da nessun sito!"
+            else:
+                alert_message += f"\n✅ Backup funzionante: {len(tutti_i_link)} storie trovate"
+            
+            print(f"📢 Invio allarme: {alert_message[:100]}...")
+            send_telegram(f"🚨 ALLARME SITI\n\n{alert_message}")
+        
+        # Log dettagliato (sempre visibile nei log)
+        print(f"\n📋 Riepilogo Health Check:")
+        print(f"   StoriesViewer: {storiesviewer_status} - Error: {storiesviewer_error}")
+        print(f"   IQSaved: {iqsaved_status} - Error: {iqsaved_error}")
+        
+        # Allarme critico solo se entrambi i siti falliscono completamente
+        if len(tutti_i_link) == 0 and storiesviewer_status not in ["NO_STORIES", "UNKNOWN"] and iqsaved_status not in ["NO_STORIES", "UNKNOWN"]:
+            print("🚨 ALLARME CRITICO: Nessun sito funziona!")
+            critical_msg = f"🔴 CRITICO: Nessun sito funziona per {IG_USER}\n\n"
+            critical_msg += f"StoriesViewer: {storiesviewer_status} ({storiesviewer_error})\n"
+            critical_msg += f"IQSaved: {iqsaved_status} ({iqsaved_error})\n\n"
+            critical_msg += "Intervento immediato richiesto!"
+            send_telegram(critical_msg)
         # =========================================================
         
         print(f"\n✅ BOT COMPLETATO")
