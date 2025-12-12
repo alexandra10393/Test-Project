@@ -4,6 +4,28 @@ import re
 import requests
 from playwright.sync_api import sync_playwright
 from urllib.parse import unquote
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# Crea sessione con pooling
+def create_telegram_session():
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=['POST', 'GET']
+    )
+    adapter = HTTPAdapter(
+        max_retries=retry,
+        pool_connections=10,
+        pool_maxsize=10,
+        pool_block=False
+    )
+    session.mount('https://', adapter)
+    return session
+
+TELEGRAM_SESSION = create_telegram_session()
 
 # --- CONFIGURAZIONE ---
 # Usa le variabili d'ambiente (Secrets)
@@ -43,18 +65,36 @@ def send_telegram(text, media_url=None, is_video=False):
     method = "sendVideo" if is_video else "sendPhoto"
     print(f"✈️ Invio Telegram: {text}")
     
-    if media_url:
-        try:
+    try:
+        if media_url:
             payload = {"chat_id": CHAT_ID, "caption": text, "parse_mode": "HTML"}
             files_key = 'video' if is_video else 'photo'
-            # Timeout aumentato per video pesanti
-            requests.post(api_url + method, data=payload, params={files_key: media_url}, timeout=120)
-        except Exception as e:
-            print(f"❌ Errore invio media: {e}")
-            # Fallback: invia solo il link
-            requests.post(api_url + "sendMessage", json={"chat_id": CHAT_ID, "text": text + f"\n\n(Link diretto: {media_url})"})
-    else:
-        requests.post(api_url + "sendMessage", json={"chat_id": CHAT_ID, "text": text})
+            # Usa la sessione con pooling
+            response = TELEGRAM_SESSION.post(
+                api_url + method, 
+                data=payload, 
+                params={files_key: media_url}, 
+                timeout=120
+            )
+            response.raise_for_status()
+        else:
+            response = TELEGRAM_SESSION.post(
+                api_url + "sendMessage", 
+                json={"chat_id": CHAT_ID, "text": text},
+                timeout=30
+            )
+            response.raise_for_status()
+            
+    except Exception as e:
+        print(f"❌ Errore invio Telegram: {e}")
+        # Fallback con sessione nuova
+        try:
+            requests.post(api_url + "sendMessage", 
+                         json={"chat_id": CHAT_ID, 
+                               "text": text + f"\n\n(Link: {media_url if media_url else 'N/A'})"},
+                         timeout=30)
+        except:
+            print(f"❌ Fallback anche fallito")
 
 def ocr_scan(image_url):
     if not OCR_KEY: return ""
@@ -245,41 +285,107 @@ def check_iqsaved(page):
         print(f"❌ Errore IQSaved: {e}")
         return links, status, error_details
 
+# --- FUNZIONI DI RECOVERY E GESTIONE ERRORI ---
+
+def safe_check_storiesviewer(page):
+    """Wrapper con gestione errori robusta per StoriesViewer"""
+    try:
+        print("🔒 Esecuzione sicura StoriesViewer...")
+        return check_storiesviewer(page)
+    except Exception as e:
+        error_msg = f"💀 CRASH GRAVE StoriesViewer: {str(e)[:200]}"
+        print(error_msg)
+        return [], "FATAL_ERROR", f"Crash completo: {str(e)[:100]}"
+
+def safe_check_iqsaved(page):
+    """Wrapper con gestione errori robusta per IQSaved"""
+    try:
+        print("🔒 Esecuzione sicura IQSaved...")
+        return check_iqsaved(page)
+    except Exception as e:
+        error_msg = f"💀 CRASH GRAVE IQSaved: {str(e)[:200]}"
+        print(error_msg)
+        return [], "FATAL_ERROR", f"Crash completo: {str(e)[:100]}"
+
+def emergency_cleanup(browser=None, context=None):
+    """Pulizia di emergenza se tutto va male"""
+    print("🆘 Esecuzione cleanup di emergenza...")
+    try:
+        if context:
+            context.close()
+    except:
+        pass
+    try:
+        if browser:
+            browser.close()
+    except:
+        pass
+    # Forza garbage collection
+    import gc
+    gc.collect()
+    print("✅ Cleanup di emergenza completato")
+# -----------------------------------------------------------------
 def run():
     print("🚀 Avvio Bot Ibrido...")
-    
-    # Carica History
-    seen_ids = []
-    if os.path.exists("history.txt"):
-        with open("history.txt", "r") as f:
-            seen_ids = f.read().splitlines()
 
- # Definisci le variabili all'inizio per evitare NameError
-    updated_history = seen_ids.copy()
-    ids_to_add = []
+    # Variabili per cleanup
+    browser = None
+    context = None
 
-    with sync_playwright() as p:
-        # Browser con viewport più grande per simulare desktop
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            viewport={'width': 1280, 'height': 800}
-        )
-        page = context.new_page()
+    try:
+        # Carica History
+        seen_ids = []
+        if os.path.exists("history.txt"):
+            with open("history.txt", "r") as f:
+                seen_ids = f.read().splitlines()
+
+        # Definisci le variabili all'inizio per evitare NameError
+        updated_history = seen_ids.copy()
+        ids_to_add = []
+
+        with sync_playwright() as p:
+            # Browser con argomenti ottimizzati
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-dev-shm-usage',
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-gpu',
+                ]
+            )
+            
+            # Context con viewport più grande per simulare desktop
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+                viewport={'width': 1280, 'height': 800}
+            )
+            
+            page = context.new_page()
 
         # --- STRATEGIA NUOVA (StoriesViewer + IQSaved) ---
         all_links = []
 
-        # FASE 1: StoriesViewer (Sito Veloce con estrazione Proxy)
-        links_viewer, storiesviewer_status, storiesviewer_error = check_storiesviewer(page)
-        all_links.extend(links_viewer)
+        # FASE 1: StoriesViewer (con recovery)
+        try:
+            links_viewer, storiesviewer_status, storiesviewer_error = safe_check_storiesviewer(page)
+            all_links.extend(links_viewer)
+            print(f"✅ StoriesViewer completato: {len(links_viewer)} link")
+        except Exception as e:
+            print(f"⚠️ Fallback a safe_check: {e}")
+            links_viewer, storiesviewer_status, storiesviewer_error = [], "SAFECHECK_ERROR", str(e)[:100]
         
-        # FASE 2: IQSaved (Riserva)
+        # FASE 2: IQSaved (Riserva con recovery)
         links_iq, iqsaved_status, iqsaved_error = [], "NOT_TESTED", ""
-        if len(all_links) < 5:
-            print("\n=== FASE 2: IQSAVED (FALLBACK) ===")
-            links_iq, iqsaved_status, iqsaved_error = check_iqsaved(page)
-            all_links.extend(links_iq)
+        try:
+            if len(all_links) < 5:
+                print("\n=== FASE 2: IQSAVED (FALLBACK) ===")
+                links_iq, iqsaved_status, iqsaved_error = safe_check_iqsaved(page)
+                all_links.extend(links_iq)
+                print(f"✅ IQSaved completato: {len(links_iq)} link")
+        except Exception as e:
+            print(f"⚠️ Fallback IQSaved fallito: {e}")
+            links_iq, iqsaved_status, iqsaved_error = [], "SAFECHECK_ERROR", str(e)[:100]
         
         # Unione liste (senza duplicati) e conteggio
         tutti_i_link = list(dict.fromkeys(all_links))
