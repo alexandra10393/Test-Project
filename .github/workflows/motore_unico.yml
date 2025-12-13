@@ -16,17 +16,7 @@ jobs:
 
     - name: Check Orario Italiano (08:00 - 02:00)
       id: check-time
-      run: |
-        hour=$(TZ="Europe/Rome" date +%H)
-        echo "Ora italiana: $hour"
-        
-        if [ "$hour" -ge 8 ] || [ "$hour" -lt 2 ]; then
-          echo "✅ Orario operativo. Procedo."
-          echo "run_bot=true" >> $GITHUB_OUTPUT
-        else
-          echo "💤 Orario notturno (02:00-08:00). Bot a nanna."
-          echo "run_bot=false" >> $GITHUB_OUTPUT
-        fi
+      # ... (keep your existing time check logic)
 
     - uses: actions/setup-python@v4
       if: steps.check-time.outputs.run_bot == 'true'
@@ -34,61 +24,16 @@ jobs:
         python-version: '3.9'
         cache: 'pip'
 
-    # 🔥 CACHE PLAYWRIGHT OTTIMIZZATA 
-    - name: Cache Playwright browsers
-      if: steps.check-time.outputs.run_bot == 'true'
-      uses: actions/cache@v3
-      id: playwright-cache
-      with:
-        path: |
-          ~/.cache/ms-playwright
-          /opt/hostedtoolcache/ms-playwright
-        key: ${{ runner.os }}-playwright-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-playwright-
-
-    - name: Installazione Dipendenze
+    # 🔧 Updated: Install Python dependencies
+    - name: Install Python and Playwright Dependencies
       if: steps.check-time.outputs.run_bot == 'true'
       run: |
         pip install -r requirements.txt
-        # Installa Playwright anche se in cache (per sicurezza)
-        pip install playwright==1.40.0
-
-    - name: Installazione Browser Chromium
-      if: steps.check-time.outputs.run_bot == 'true'
-      run: |
-        echo "📦 Installazione/verifica Chromium..."
-        # Forza installazione Chromium
-        python -m playwright install chromium --with-deps
-        echo "✅ Chromium installato"
-        
-        # Verifica che esista
-        if [ -f ~/.cache/ms-playwright/chromium-*/chrome-linux/chrome ]; then
-          echo "✅ Chromium trovato nel cache"
-        else
-          echo "❌ Chromium non trovato, reinstallazione..."
-          python -m playwright install --force chromium
-        fi
-
-    - name: Verifica Playwright
-      if: steps.check-time.outputs.run_bot == 'true'
-      run: |
-        echo "🔍 Verifica installazione Playwright..."
-        python -c "import playwright; print(f'✅ Playwright versione: {playwright.__version__}')"
-        
-        # Verifica che chromium sia installato
-        python -c "
-        from playwright.sync_api import sync_playwright
-        p = sync_playwright().start()
-        try:
-            browser = p.chromium.launch(headless=True, timeout=5000)
-            print('✅ Chromium funziona correttamente')
-            browser.close()
-        except Exception as e:
-            print(f'❌ Errore Chromium: {e}')
-        finally:
-            p.stop()
-        "
+        # Install Playwright system dependencies (Ubuntu 24.04 compatible)
+        sudo apt-get update
+        sudo apt-get install -y libnss3 libatk-bridge2.0-0t64 libxss1 libasound2t64 libgbm1 libgtk-3-0t64 libxshmfence-dev libxrandr2 libxcomposite1 libxcursor1 libxdamage1 libxi6
+        # Install Playwright browsers
+        playwright install chromium
 
     - name: Esecuzione Bot
       if: steps.check-time.outputs.run_bot == 'true'
