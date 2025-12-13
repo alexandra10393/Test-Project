@@ -7,7 +7,7 @@ import shutil
 import glob
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse, parse_qs
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -229,6 +229,23 @@ def retry_with_backoff(func, max_retries=1, *args, **kwargs):
                   f"Ritento in {wait_time}s... ({str(e)[:80]})")
             time.sleep(wait_time)
 
+def extract_real_url(iqsaved_url):
+    """Estrae il vero URL Instagram da un link IQSaved"""
+    try:
+        if "img2.php?url=" in iqsaved_url:
+            # Estrai il parametro url
+            parsed = urlparse(iqsaved_url)
+            query_params = parse_qs(parsed.query)
+            if 'url' in query_params:
+                real_url = query_params['url'][0]
+                # Decodifica URL encoding
+                real_url = unquote(real_url)
+                return real_url
+        return iqsaved_url
+    except Exception as e:
+        print(f"⚠️ Errore estrazione URL da IQSaved: {e}")
+        return iqsaved_url
+
 def validate_links(links):
     """Valida che i link siano corretti e rimuovi malformati"""
     if not links:
@@ -244,15 +261,23 @@ def validate_links(links):
         
         link = link.strip()
         
-        if len(link) < 20:
+        if len(link) < 10:
             invalid_count += 1
             continue
+        
+        # Se è un link IQSaved, estrai il vero URL
+        if "cdn.iqsaved.com" in link:
+            link = extract_real_url(link)
+            if not link:
+                invalid_count += 1
+                continue
         
         instagram_patterns = [
             "cdninstagram.com",
             "scontent.cdninstagram.com",
             "fbcdn.net",
-            "instagram.f"
+            "instagram.f",
+            "instagram.com"
         ]
         
         if not any(pattern in link for pattern in instagram_patterns):
@@ -324,6 +349,10 @@ OCR_KEY = os.environ.get("OCR_KEY", "")
 def get_clean_id(url):
     """Estrai ID univoco dal link"""
     try:
+        # Per link IQSaved, usa l'URL Instagram decodificato
+        if "cdn.iqsaved.com" in url:
+            url = extract_real_url(url)
+        
         if "filename=" in url:
             return url.split("filename=")[1].split("&")[0]
         if "/media/" in url:
@@ -404,6 +433,34 @@ def ocr_scan(image_url):
 # MOTORI DI SCRAPING OTTIMIZZATI
 # ===============================
 
+def retry_storiesviewer(page, max_retries=1):
+    """Tenta StoriesViewer con retry automatico e refresh"""
+    print(f"🔄 Tentativo StoriesViewer con {max_retries} retry...")
+    
+    for attempt in range(max_retries + 1):
+        try:
+            print(f"  Tentativo {attempt + 1}/{max_retries + 1}")
+            links, status, error_details = check_storiesviewer(page)
+            
+            if links or status in ["NO_STORIES", "SERVER_UNAVAILABLE"]:
+                return links, status, error_details
+            
+            # Se nessun link ma non è NO_STORIES, riprova con refresh
+            if attempt < max_retries:
+                print(f"  ⏳ Nessun link trovato, refresh e riprovo tra 3s...")
+                page.reload()
+                time.sleep(3)
+                
+        except Exception as e:
+            if attempt < max_retries:
+                print(f"  ⚠️ Errore, riprovo: {str(e)[:80]}")
+                page.reload()
+                time.sleep(3)
+            else:
+                return [], "RETRY_FAILED", str(e)
+    
+    return [], "ALL_RETRIES_FAILED", "Tutti i tentativi falliti"
+
 def check_storiesviewer(page):
     """Scarica storie da StoriesViewer.net con timeout ottimizzati"""
     print(f"⏩ Controllo StoriesViewer.net...")
@@ -414,9 +471,8 @@ def check_storiesviewer(page):
     error_details = ""
     start_time = time.time()
     
-    # TIMEOUT OTTIMIZZATI (basati sul tuo run di 23s)
     consecutive_fails = get_consecutive_fails("StoriesViewer")
-    base_timeout = 30000  # Ridotto da 60000 a 30000 (30s)
+    base_timeout = 30000
     
     if consecutive_fails >= 2:
         adjusted_timeout = max(15000, base_timeout - (consecutive_fails * 5000))
@@ -441,13 +497,13 @@ def check_storiesviewer(page):
         
         try:
             search_input = page.locator('input[name="url"], input[type="text"]').first
-            search_input.wait_for(state="visible", timeout=8000)  # Ridotto da 10000
+            search_input.wait_for(state="visible", timeout=8000)
             search_input.click()
             search_input.fill(IG_USER)
-            time.sleep(0.5)  # Ridotto da 1s
+            time.sleep(0.5)
             
             search_btn = page.locator('button[type="submit"], button:has(i), button.btn-default').first
-            search_btn.wait_for(state="visible", timeout=4000)  # Ridotto da 5000
+            search_btn.wait_for(state="visible", timeout=4000)
             search_btn.click()
             print("🖱️ Lente cliccata!")
             
@@ -460,14 +516,14 @@ def check_storiesviewer(page):
 
         try:
             try:
-                page.wait_for_selector('text="Caricamento", text="Loading"', state='hidden', timeout=15000)  # Ridotto da 30000
+                page.wait_for_selector('text="Caricamento", text="Loading"', state='hidden', timeout=15000)
                 print("✅ Caricamento completato.")
             except:
                 print("ℹ️ Nessun indicatore di caricamento")
                 pass
             
             try:
-                page.wait_for_selector('text="Sorry, the server is temporarily unavailable"', timeout=3000)  # Ridotto da 5000
+                page.wait_for_selector('text="Sorry, the server is temporarily unavailable"', timeout=3000)
                 status = "SERVER_UNAVAILABLE"
                 error_details = "Server temporaneamente non disponibile"
                 print("ℹ️ StoriesViewer: Server temporaneamente non disponibile")
@@ -477,7 +533,7 @@ def check_storiesviewer(page):
                 pass
             
             try:
-                page.wait_for_selector('text="No stories found", text="Nessuna storia", text="not found"', timeout=3000)  # Ridotto da 5000
+                page.wait_for_selector('text="No stories found", text="Nessuna storia", text="not found"', timeout=3000)
                 status = "NO_STORIES"
                 error_details = "Profilo senza storie o privato"
                 print("ℹ️ StoriesViewer: Nessuna storia trovata")
@@ -486,7 +542,7 @@ def check_storiesviewer(page):
             except:
                 pass
                 
-            page.wait_for_selector('a:has-text("Download HD"), .story-item, .stories-container', timeout=15000)  # Ridotto da 30000
+            page.wait_for_selector('a:has-text("Download HD"), .story-item, .stories-container', timeout=15000)
             print("✨ Elementi storie trovati!")
             
         except Exception as e:
@@ -522,7 +578,7 @@ def check_storiesviewer(page):
                 print(f"⚠️ StoriesViewer: nessun link in {elapsed:.1f}s")
             track_failure("StoriesViewer", status)
             
-        if elapsed > 25000:  # Warning se > 25s
+        if elapsed > 25000:
             print(f"⚠️ ATTENZIONE: StoriesViewer lento ({elapsed:.1f}s)")
             
         return links, status, error_details
@@ -535,7 +591,7 @@ def check_storiesviewer(page):
         return links, status, error_details
 
 def check_iqsaved(page):
-    """Scarica storie da IQSaved.com con timeout ottimizzati"""
+    """Scarica storie da IQSaved.com - estrae link reali da img2.php"""
     print(f"🔎 Controllo IQSAVED per {IG_USER}...")
     
     target_url = f"https://iqsaved.com/it/viewer/{IG_USER}/"
@@ -545,7 +601,7 @@ def check_iqsaved(page):
     start_time = time.time()
     
     consecutive_fails = get_consecutive_fails("IQSaved")
-    base_timeout = 30000  # Ridotto da 60000
+    base_timeout = 30000
     
     if consecutive_fails >= 2:
         adjusted_timeout = max(15000, base_timeout - (consecutive_fails * 5000))
@@ -562,8 +618,8 @@ def check_iqsaved(page):
             print(f"❌ IQSaved HTTP Error: {response.status}")
             track_failure("IQSaved", status)
             return links, status, error_details
-            
-        time.sleep(3)  # Mantenuto per caricamento JavaScript
+        
+        time.sleep(3)
         
         try:
             page.click("button.fc-cta-consent, button.primary-button, .cookie-agree", timeout=2000)
@@ -571,35 +627,57 @@ def check_iqsaved(page):
             pass
 
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        time.sleep(2)  # Ridotto da 3
+        time.sleep(2)
         
+        # Estrai tutti i link che contengono img2.php
         page_content = page.content()
         
-        if "No stories found" in page_content or "Nessuna storia" in page_content:
-            status = "NO_STORIES"
-            error_details = "Profilo senza storie o privato"
-            print("ℹ️ IQSaved: Nessuna storia trovata")
-            track_failure("IQSaved", status)
-            return links, status, error_details
-            
-        raw_links = re.findall(r'https://cdn\.iqsaved\.com/[^"\']+', page_content)
-        links = [l.replace('&amp;', '&') for l in raw_links]
+        # Pattern 1: Link img2.php con parametro url
+        raw_links = re.findall(r'https?://cdn\.iqsaved\.com/img2\.php\?url=[^\s"\']+', page_content)
         
-        links = validate_links(links)
+        # Pattern 2: Cerca nei bottoni "SCARICA FOTO" e "SCARICA VIDEO"
+        buttons = page.query_selector_all('a, button')
+        for btn in buttons:
+            btn_text = btn.inner_text() if btn.is_visible() else ""
+            if "SCARICA" in btn_text.upper():
+                href = btn.get_attribute("href")
+                if href and "cdn.iqsaved.com/img2.php" in href:
+                    raw_links.append(href)
+        
+        # Pattern 3: Cerca elementi con attributi data
+        elements = page.query_selector_all('[href*="img2.php"], [src*="img2.php"], [data-url*="img2.php"]')
+        for el in elements:
+            for attr in ['href', 'src', 'data-url', 'data-src']:
+                url = el.get_attribute(attr)
+                if url and "cdn.iqsaved.com/img2.php" in url:
+                    raw_links.append(url)
+        
+        raw_links = list(set(raw_links))  # Rimuovi duplicati
+        print(f"  📊 Trovati {len(raw_links)} link img2.php grezzi")
+        
+        # Estrai i veri URL Instagram
+        for raw_link in raw_links:
+            real_url = extract_real_url(raw_link)
+            if real_url and "instagram.com" in real_url:
+                links.append(real_url)
+                print(f"    ✅ URL estratto: {real_url[:80]}...")
         
         elapsed = time.time() - start_time
         
         if links:
             status = "SUCCESS"
-            print(f"✅ IQSaved: {len(links)} link in {elapsed:.1f}s")
+            print(f"✅ IQSaved: {len(links)} link Instagram estratti in {elapsed:.1f}s")
             track_failure("IQSaved", status)
             track_performance("IQSaved", elapsed)
         else:
             status = "NO_LINKS"
-            print(f"⚠️ IQSaved: nessun link in {elapsed:.1f}s")
+            print(f"⚠️ IQSaved: nessun link estratto in {elapsed:.1f}s")
+            print(f"   HTML salvato per debug: iqsaved_debug_{datetime.now().strftime('%H%M%S')}.html")
+            with open(f"iqsaved_debug_{datetime.now().strftime('%H%M%S')}.html", "w", encoding="utf-8") as f:
+                f.write(page_content[:10000])
             track_failure("IQSaved", status)
             
-        return list(dict.fromkeys(links)), status, error_details
+        return links, status, error_details
         
     except Exception as e:
         status = "CRASH"
@@ -616,7 +694,7 @@ def safe_check_storiesviewer(page):
     """Wrapper con gestione errori robusta"""
     try:
         print("🔒 Esecuzione sicura StoriesViewer...")
-        return check_storiesviewer(page)
+        return retry_storiesviewer(page, max_retries=1)
     except Exception as e:
         error_msg = f"💀 CRASH GRAVE StoriesViewer: {str(e)[:200]}"
         print(error_msg)
@@ -655,22 +733,22 @@ def emergency_cleanup(browser=None, context=None):
 
 def run():
     """Funzione principale del bot"""
-    cleanup_old_logs(7)  # Pulisce log vecchi di 7 giorni
+    cleanup_old_logs(7)
 
     # Backup automatico history
-if os.path.exists("history.txt"):
-    import shutil
-    data_oggi = datetime.now().strftime("%Y%m%d")
-    backup_file = f"history_backup_{data_oggi}.txt"
-    if not os.path.exists(backup_file):
-        shutil.copy2("history.txt", backup_file)
-        print(f"💾 Backup creato: {backup_file}")
-    
-    # Tieni solo ultimi 7 backup
-    backups = sorted([f for f in os.listdir(".") if f.startswith("history_backup_")])
-    for old_backup in backups[:-7]:  # Rimuovi vecchi
-        os.remove(old_backup)
-        print(f"🗑️  Rimosso vecchio backup: {old_backup}")
+    if os.path.exists("history.txt"):
+        import shutil
+        data_oggi = datetime.now().strftime("%Y%m%d")
+        backup_file = f"history_backup_{data_oggi}.txt"
+        if not os.path.exists(backup_file):
+            shutil.copy2("history.txt", backup_file)
+            print(f"💾 Backup creato: {backup_file}")
+        
+        # Tieni solo ultimi 7 backup
+        backups = sorted([f for f in os.listdir(".") if f.startswith("history_backup_")])
+        for old_backup in backups[:-7]:
+            os.remove(old_backup)
+            print(f"🗑️  Rimosso vecchio backup: {old_backup}")
     
     log_semplice("🚀 Avvio Bot Ibrido Avanzato...")
     
@@ -819,7 +897,7 @@ if os.path.exists("history.txt"):
                 ids_to_add.append(clean_id)
                 
                 if i < len(storie_da_processare) - 1:
-                    sleep_time = 1.5 + (i * 0.3)  # Sleep progressivo ridotto
+                    sleep_time = 1.5 + (i * 0.3)
                     sleep_time = min(sleep_time, 4)
                     time.sleep(sleep_time)
         
