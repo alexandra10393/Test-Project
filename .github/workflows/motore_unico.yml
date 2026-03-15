@@ -1,0 +1,151 @@
+name: Motore Unico (All-in-One)
+
+on:
+  schedule:
+    - cron: '*/10 6-23 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  run-tracker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10  # Aumenta timeout
+    
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Check Orario Italiano (08:00 - 02:00)
+        id: check-time
+        run: |
+          hour=$(TZ="Europe/Rome" date +%H)
+          echo "Ora italiana: $hour"
+          
+          # Esegui solo se sono le 8:00 o più, OPPURE prima delle 2:00 di notte
+          # Dorme dalle 02:00 alle 07:59
+          if [ "$hour" -ge 8 ] || [ "$hour" -lt 2 ]; then
+            echo "✅ Orario operativo. Procedo."
+            echo "run_bot=true" >> $GITHUB_OUTPUT
+          else
+            echo "💤 Orario notturno (02:00-08:00). Bot a nanna."
+            echo "run_bot=false" >> $GITHUB_OUTPUT
+          fi
+
+
+      - uses: actions/setup-python@v4
+        if: steps.check-time.outputs.run_bot == 'true'
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install System Dependencies
+        if: steps.check-time.outputs.run_bot == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
+      - name: Install Python Dependencies
+        if: steps.check-time.outputs.run_bot == 'true'
+        run: |
+          pip install --upgrade pip
+          pip install playwright requests playwright-stealth
+          playwright install --with-deps chromium
+          # Verifica installazione
+          python -c "from playwright.sync_api import sync_playwright; print('✅ Playwright importato correttamente')"
+
+      - name: Test Playwright Installation
+        if: steps.check-time.outputs.run_bot == 'true'
+        run: |
+          cat > test_playwright.py << 'EOF'
+          from playwright.sync_api import sync_playwright
+          import time
+          
+          print("🧪 Test Playwright su GitHub Actions...")
+          
+          with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-dev-shm-usage']
+            )
+            page = browser.new_page()
+            page.goto('https://example.com')
+            title = page.title()
+            print(f"✅ Titolo pagina: {title}")
+            browser.close()
+            print("✅ Test completato con successo!")
+          EOF
+          
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python test_playwright.py
+
+      - name: Esecuzione Bot
+        if: steps.check-time.outputs.run_bot == 'true'
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          OCR_KEY: ${{ secrets.OCR_KEY }}
+          IG_USER: ${{ secrets.IG_USER }}
+          KEYWORD_1: ${{ secrets.KEYWORD_1 }}
+          KEYWORD_2: ${{ secrets.KEYWORD_2 }}
+          KEYWORD_3: ${{ secrets.KEYWORD_3 }}
+        run: |
+          echo "🚀 Avvio bot con xvfb..."
+          echo "Variabili ambiente:"
+          echo "IG_USER: $IG_USER"
+          echo "TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:0:10}..."
+          
+          # Esegui con xvfb e timeout di 7.5 minuti (aumentato per retry StoriesViewer)
+          timeout 450 xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python -u main.py
+          
+          echo "📊 Esito: $?"
+
+      - name: 📱 Mostra log telefono
+        if: always()
+        run: |
+          echo "📱 ULTIME RIGHE LOG TELEFONO:"
+          if [ -f "log_telefono.txt" ]; then
+            tail -20 log_telefono.txt
+          else
+            echo "File log_telefono.txt non trovato"
+          fi
+          
+          echo "📄 CONTENUTO HISTORY.TXT:"
+          if [ -f "history.txt" ]; then
+            wc -l history.txt
+            tail -5 history.txt
+          else
+            echo "File history.txt non trovato"
+          fi
+
+      - name: Upload Debug Files
+        if: always() && steps.check-time.outputs.run_bot == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-debug-files
+          path: |
+            *.txt
+            *.json
+            *.log
+            *.png
+            *.html
+          retention-days: 2
+
+      - uses: stefanzweifel/git-auto-commit-action@v4
+        if: steps.check-time.outputs.run_bot == 'true'
+        with:
+          commit_message: "Bot: Aggiornamento automatico history"
+          file_pattern: |
+            history.txt
+            log_telefono.txt
+          commit_user_name: 'GitHub Actions Bot'
+          commit_user_email: 'actions@github.com'
+
+      - name: Update history.txt
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add history.txt
+          # L'opzione --amend modifica l'ultimo commit invece di crearne uno nuovo
+          git commit --amend -m "Auto-update history.txt" || git commit -m "Auto-update history.txt"
+          # Il push deve essere forzato perché stiamo riscrivendo la storia
+          git push --force origin main
