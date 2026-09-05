@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Log files
+*.log
+*.txt
+!requirements.txt
+log_telefono.txt
+performance_log.txt
+error_log.txt
+failure_tracker.json
+history.txt
+history_backup_*.txt
+
+# Debug files
+debug_*.png
+debug_*.html
+*.html
+iqsaved_debug.html
+playwright_logs.txt
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+test_*.py
+*.test
+
