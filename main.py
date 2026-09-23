@@ -12,23 +12,57 @@ from playwright.sync_api import sync_playwright
 from urllib.parse import unquote, urlparse, parse_qs
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from functools import lru_cache
 from typing import List, Tuple, Optional, Dict
-
-# Import opzionale playwright-stealth 2.0+ (per evitare blocchi anti-bot)
-try:
-    from playwright_stealth import Stealth
-    STEALTH_AVAILABLE = True
-    STEALTH_INSTANCE = Stealth()  # Crea istanza una volta sola
-except ImportError:
-    STEALTH_AVAILABLE = False
-    STEALTH_INSTANCE = None
-    print("⚠️ playwright-stealth non installato, continuo senza stealth")
 
 # ===============================
 # FUNZIONI DI SISTEMA E UTILITY
 # ===============================
+
+def reset_page_state(page, target_url: Optional[str] = None):
+    """
+    Riporta la pagina a uno stato pulito dopo errori DNS/navigazione.
+    Se la pagina è su chrome-error:// o about:blank, evita reload e usa goto.
+    """
+    try:
+        current = page.url or ""
+        if current.startswith("chrome-error://") or current in ("about:blank", ""):
+            page.goto("about:blank", timeout=5000)
+            time.sleep(0.5)
+    except Exception:
+        pass
+
+    if target_url:
+        try:
+            page.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as e:
+            print(f"  ⚠️ reset_page_state: goto fallito per {target_url}: {str(e)[:80]}")
+
+
+def preflight_dns_check() -> Dict[str, bool]:
+    """
+    Verifica rapida di risoluzione DNS per i domini target.
+    Ritorna dict {dominio: True/False}.
+    """
+    import socket
+    domains = [
+        "instasave.website",
+        "iqsaved.com",
+        "storiesviewer.net",
+        "instasaved.net",
+        "api.telegram.org",
+    ]
+    results = {}
+    for d in domains:
+        try:
+            socket.getaddrinfo(d, 443, proto=socket.IPPROTO_TCP)
+            results[d] = True
+        except Exception as e:
+            results[d] = False
+            print(f"  ❌ DNS fail per {d}: {type(e).__name__}")
+    ok = sum(1 for v in results.values() if v)
+    print(f"🔍 Preflight DNS: {ok}/{len(domains)} domini risolvibili")
+    return results
+
 
 # Crea sessione con pooling per Telegram
 def create_telegram_session():
@@ -58,10 +92,6 @@ FAILURE_FILE = "failure_tracker.json"
 PERFORMANCE_FILE = "performance_log.txt"
 ERROR_LOG_FILE = "error_log.txt"
 
-# Cache per evitare richieste duplicate
-_url_cache: Dict[str, Tuple[float, Optional[str]]] = {}
-_cache_ttl = 3600  # 1 ora
-
 def get_adaptive_timeout(site_name: str, base_timeout: int = 25000) -> int:
     """Calcola timeout adattivo basato su fallimenti consecutivi"""
     consecutive_fails = get_consecutive_fails(site_name)
@@ -79,25 +109,9 @@ def get_adaptive_timeout(site_name: str, base_timeout: int = 25000) -> int:
 # CLEANUP AUTOMATICO LOG
 # ===============================
 
-def cleanup_cache():
-    """Pulisce cache URL vecchia"""
-    global _url_cache
-    current_time = time.time()
-    expired_keys = [
-        url for url, (cache_time, _) in _url_cache.items()
-        if current_time - cache_time >= _cache_ttl
-    ]
-    for key in expired_keys:
-        _url_cache.pop(key, None)
-    if expired_keys:
-        print(f"  🗑️  Rimossi {len(expired_keys)} entry dalla cache URL")
-
 def cleanup_old_logs(days_to_keep=7, max_performance_entries=1000):
     """Pulisce file log vecchi e mantiene dimensioni gestibili"""
     print("🧹 Pulizia log in corso...")
-    
-    # Pulisci cache URL
-    cleanup_cache()
     
     # 1. Pulizia file per data
     log_files = [PERFORMANCE_FILE, FAILURE_FILE, ERROR_LOG_FILE, "debug_screenshot.png"]
@@ -160,148 +174,6 @@ def cleanup_old_logs(days_to_keep=7, max_performance_entries=1000):
         pass
     
     print("✅ Pulizia log completata")
-
-ANON_VIEWER_MEDIA_RE = re.compile(
-    r"https?://[a-z0-9.-]*anon-viewer\.com/media\.php[^\s\"'<>]*",
-    re.IGNORECASE,
-)
-
-
-def normalize_anon_viewer_href(href: str) -> Optional[str]:
-    """Normalizza link proxy Mollygram (fr14.fr15… anon-viewer.com/media.php)."""
-    if not href or not isinstance(href, str):
-        return None
-    href = href.strip()
-    if href.startswith("//"):
-        href = f"https:{href}"
-    elif href.startswith("/"):
-        href = f"https://anon-viewer.com{href}"
-    if "anon-viewer.com/media.php" not in href.lower():
-        return None
-    return href
-
-
-def decode_mollygram_url(proxy_url):
-    """Decodifica URL anon-viewer (param media=) in link diretto Instagram CDN."""
-    try:
-        proxy_url = normalize_anon_viewer_href(proxy_url) or proxy_url
-        parsed = urlparse(proxy_url)
-        query_params = parse_qs(parsed.query)
-
-        if "media" not in query_params:
-            return None
-
-        media_param = query_params["media"][0]
-        final_url = unquote(media_param)
-        while "%" in final_url:
-            next_url = unquote(final_url)
-            if next_url == final_url:
-                break
-            final_url = next_url
-
-        if "cdninstagram.com" in final_url or "instagram.com" in final_url:
-            return final_url
-        return None
-    except Exception as e:
-        print(f"❌ Errore decodifica Mollygram: {e}")
-        return None
-
-
-def collect_mollygram_proxy_urls(page) -> List[str]:
-    """Raccoglie URL media.php in ordine DOM (frXX host irrilevante per ordinamento)."""
-    proxy_urls: List[str] = []
-    seen: set = set()
-
-    def add_href(href: Optional[str]) -> None:
-        norm = normalize_anon_viewer_href(href) if href else None
-        if norm and norm not in seen:
-            seen.add(norm)
-            proxy_urls.append(norm)
-
-    for el in page.query_selector_all(
-        'a[href*="anon-viewer.com"], a[href*="media.php"]'
-    ):
-        try:
-            add_href(el.get_attribute("href"))
-        except Exception:
-            continue
-
-    if not proxy_urls:
-        for el in page.query_selector_all("a"):
-            try:
-                href = el.get_attribute("href")
-                if href and "media.php" in href and "anon-viewer" in href:
-                    add_href(href)
-            except Exception:
-                continue
-
-    try:
-        for match in ANON_VIEWER_MEDIA_RE.findall(page.content()):
-            add_href(match)
-    except Exception:
-        pass
-
-    return proxy_urls
-
-
-MOLLYGRAM_STORY_LOAD_MAX_SEC = 30
-MOLLYGRAM_STORY_POLL_SEC = 2
-
-
-def wait_for_mollygram_stories(page, max_wait_sec: int = MOLLYGRAM_STORY_LOAD_MAX_SEC):
-    """
-    Attende che compaiano link anon-viewer (tempo variabile, spesso ~20s).
-    Returns: ('ok', urls) | ('server_down', []) | ('timeout', [])
-    """
-    deadline = time.time() + max_wait_sec
-    last_log = 0.0
-    scroll_accum = 0.0
-    load_started = time.time()
-
-    print(
-        f"  ⏳ Attendo storie (polling ogni {MOLLYGRAM_STORY_POLL_SEC}s, "
-        f"max {max_wait_sec}s — il sito può impiegare ~20s)..."
-    )
-
-    while time.time() < deadline:
-        if mollygram_server_unavailable(page):
-            return "server_down", []
-
-        proxy_urls = collect_mollygram_proxy_urls(page)
-        if proxy_urls:
-            elapsed = time.time() - load_started
-            print(f"  ✅ {len(proxy_urls)} link proxy dopo {elapsed:.0f}s")
-            return "ok", proxy_urls
-
-        scroll_accum += MOLLYGRAM_STORY_POLL_SEC
-        if scroll_accum >= 6:
-            try:
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(0.3)
-                page.evaluate("window.scrollBy(0, -250)")
-            except Exception:
-                pass
-            scroll_accum = 0.0
-
-        now = time.time()
-        if now - last_log >= 5:
-            remaining = max(0, int(deadline - now))
-            print(f"     ...caricamento in corso (~{remaining}s rimasti)")
-            last_log = now
-
-        time.sleep(MOLLYGRAM_STORY_POLL_SEC)
-
-    if mollygram_server_unavailable(page):
-        return "server_down", []
-
-    proxy_urls = collect_mollygram_proxy_urls(page)
-    if proxy_urls:
-        elapsed = time.time() - load_started
-        print(f"  ✅ {len(proxy_urls)} link proxy dopo {elapsed:.0f}s (ultimo controllo)")
-        return "ok", proxy_urls
-
-    return "timeout", []
-
 
 # ===============================
 # FUNZIONI DI TRACKING E MONITORAGGIO
@@ -442,6 +314,15 @@ def extract_real_url(iqsaved_url):
                 real_url = query_params['url'][0]
                 # Decodifica URL encoding (potrebbe esserci doppia codifica)
                 real_url = unquote(unquote(real_url))
+                
+                # Se dopo decodifica NON è un URL http/https, significa che
+                # IQSaved ha cambiato formato: il token è opaco e serve il proxy.
+                # In quel caso restituiamo l'URL originale: Telegram seguirà il
+                # redirect 302 del server IQSaved verso il CDN Instagram.
+                if not real_url.startswith(("http://", "https://")):
+                    print(f"   ℹ️ Token IQSaved opaco (non URL), uso il proxy img2.php")
+                    return iqsaved_url
+                
                 print(f"   🔗 Estrazione: {real_url[:80]}...")
                 return real_url
             return iqsaved_url
@@ -556,15 +437,21 @@ def validate_links(links: List[str]) -> List[str]:
             invalid_count += 1
             continue
         
-        original_link = link
-        
-        # CASO 1: Link IQSaved - converti
+        # CASO 1: Link IQSaved
         if "cdn.iqsaved.com" in link:
             real_url = extract_real_url(link)
-            if not real_url or real_url == link or not validate_url_format(real_url):
-                invalid_count += 1
+            # Se l'estrazione ha prodotto un URL Instagram diretto, usalo
+            if real_url and real_url != link and validate_url_format(real_url):
+                link = real_url
+            else:
+                # Altrimenti è un link proxy IQSaved (token opaco): lo accettiamo
+                # come valido perché Telegram seguirà il redirect 302 verso il CDN.
+                # Verifica solo che sia un URL ben formato.
+                if not validate_url_format(link):
+                    invalid_count += 1
+                    continue
+                valid_links.append(link)
                 continue
-            link = real_url
         
         # CASO 2: Link Instasaved - converti
         elif "instasaved.net" in link and "download-file" in link:
@@ -573,6 +460,16 @@ def validate_links(links: List[str]) -> List[str]:
                 invalid_count += 1
                 continue
             link = real_url
+        
+        # CASO 3: Link Instasave.website (proxy CDN con token JWT)
+        elif "cdn.instasave.website" in link or "instasave.website" in link:
+            # I link di instasave.website contengono un token JWT con il filename.
+            # Sono proxy validi: Telegram seguirà il redirect.
+            if not validate_url_format(link):
+                invalid_count += 1
+                continue
+            valid_links.append(link)
+            continue
         
         # Validazione formato URL base
         if not validate_url_format(link):
@@ -630,88 +527,6 @@ def check_disk_space(min_mb=5):
         print(f"⚠️ Impossibile controllare spazio disco: {e}")
         return True
 
-def _get_url_timestamp(url: str, index: int) -> Tuple[str, float, int]:
-    """Estrae timestamp da un URL (funzione helper per parallelizzazione) con caching"""
-    global _url_cache
-    
-    # Controlla cache
-    current_time = time.time()
-    if url in _url_cache:
-        cached_time, cached_timestamp = _url_cache[url]
-        if current_time - cached_time < _cache_ttl and cached_timestamp is not None:
-            return (url, cached_timestamp, index)
-    
-    try:
-        # Prova HEAD request per ottenere Last-Modified
-        response = requests.head(url, timeout=3, allow_redirects=True, stream=False)
-        last_modified = response.headers.get('Last-Modified')
-        
-        if last_modified:
-            try:
-                date_obj = parsedate_to_datetime(last_modified)
-                timestamp = date_obj.timestamp()
-                # Salva in cache
-                _url_cache[url] = (current_time, timestamp)
-                return (url, timestamp, index)
-            except Exception:
-                pass
-        
-        # Fallback: usa Date header
-        date_header = response.headers.get('Date')
-        if date_header:
-            try:
-                date_obj = parsedate_to_datetime(date_header)
-                timestamp = date_obj.timestamp()
-                # Salva in cache
-                _url_cache[url] = (current_time, timestamp)
-                return (url, timestamp, index)
-            except Exception:
-                pass
-        
-        # Se non riesci a ottenere la data, mantieni l'ordine originale
-        _url_cache[url] = (current_time, None)
-        return (url, float('inf'), index)
-        
-    except Exception:
-        # In caso di errore, mantieni l'ordine originale
-        _url_cache[url] = (current_time, None)
-        return (url, float('inf'), index)
-
-def extract_story_media_id(url_or_path: str) -> Optional[int]:
-    """Estrae l'ID media Instagram (ordine di pubblicazione), non l'host frXX del proxy."""
-    try:
-        decoded = unquote(url_or_path)
-        story_file = re.search(
-            r"(\d+)_(\d{15,})_[^/?#&]*?_n\.(?:jpg|jpeg|mp4|webp)",
-            decoded,
-            re.IGNORECASE,
-        )
-        if story_file:
-            return int(story_file.group(2))
-
-        if url_or_path.startswith(("http://", "https://")):
-            name = unquote(urlparse(url_or_path).path.split("/")[-1])
-        else:
-            name = os.path.basename(url_or_path)
-        name = name.split("?")[0]
-        match = re.match(r"^\d+_(\d+)_", name)
-        if match:
-            return int(match.group(1))
-        long_nums = re.findall(r"\d{15,}", decoded)
-        if long_nums:
-            return int(long_nums[0])
-    except Exception:
-        pass
-    return None
-
-
-def story_item_key(url_or_path: str, fallback_index: int) -> Tuple[int, int, int]:
-    """Chiave di ordinamento: prima per ID media, poi per ordine sorgente."""
-    media_id = extract_story_media_id(url_or_path)
-    if media_id is not None:
-        return (0, media_id, fallback_index)
-    return (1, fallback_index, fallback_index)
-
 
 def merge_stories_preserve_order(*source_lists: List[str]) -> List[str]:
     """Unisce storie da più sorgenti rispettando priorità e senza duplicati."""
@@ -734,14 +549,12 @@ def merge_stories_preserve_order(*source_lists: List[str]) -> List[str]:
 
 
 def sort_stories_by_publication(items: List[str]) -> List[str]:
-    """Ordina dalla più vecchia alla più recente (ordine di pubblicazione)."""
-    if not items or len(items) == 1:
-        return items
-    indexed = list(enumerate(items))
-    indexed.sort(key=lambda pair: story_item_key(pair[1], pair[0]))
-    sorted_items = [item for _, item in indexed]
-    print(f"✅ Ordinamento pubblicazione: {len(sorted_items)} elementi")
-    return sorted_items
+    """
+    Preserva l'ordine cronologico di pubblicazione garantito dall'ordine DOM dei visualizzatori (dalla più vecchia alla più recente).
+    Non altera l'ordine separando foto e video.
+    """
+    print(f"✅ Ordine pubblicazione preservato: {len(items)} elementi (dalla più vecchia alla più recente)")
+    return items
 
 # ===============================
 # CONFIGURAZIONE
@@ -777,9 +590,20 @@ def get_clean_id(url):
         if os.path.isfile(url):
             return os.path.basename(url)
 
+        from urllib.parse import urlparse, parse_qs, unquote
+
+        # Per link IQSaved (img2.php), il token è nel parametro 'url' → ID univoco
+        if "img2.php" in url and "url=" in url:
+            parsed = urlparse(url)
+            query = parse_qs(parsed.query)
+            if 'url' in query:
+                token = query['url'][0]
+                # Usa il token stesso come ID (è già univoco per storia)
+                # Truncate per non avere righe enormi in history.txt
+                return token[:80]
+
         # Per link Instasaved, usa il parametro 'file'
         if "instasaved.net/download-file" in url:
-            from urllib.parse import urlparse, parse_qs, unquote
             parsed = urlparse(url)
             query = parse_qs(parsed.query)
             if 'file' in query:
@@ -788,7 +612,7 @@ def get_clean_id(url):
                 if "/" in insta_url:
                     return insta_url.split("/")[-1].split("?")[0]
                 return insta_url[-20:]
-        
+
         # Per altri tipi di link (Instagram diretti)
         if "/" in url:
             return url.split("/")[-1].split("?")[0]
@@ -802,7 +626,7 @@ def get_clean_id(url):
             return url[-20:] if len(url) > 20 else url
 
 def send_telegram(text, media_url=None, is_video=False):
-    """Invia messaggio a Telegram con connection pooling e fallback di download locale"""
+    """Invia messaggio a Telegram con connection pooling e fallback di download locale. Ritorna True se inviato con successo, False altrimenti."""
     api_url = f"https://api.telegram.org/bot{TOKEN}/"
     method = "sendVideo" if is_video else "sendPhoto"
     
@@ -822,7 +646,7 @@ def send_telegram(text, media_url=None, is_video=False):
                         timeout=120,
                     )
                 response.raise_for_status()
-                return
+                return True
 
             # ASSICURIAMOCI che l'URL non sia un link IQSaved
             if "cdn.iqsaved.com/img2.php" in media_url:
@@ -833,23 +657,25 @@ def send_telegram(text, media_url=None, is_video=False):
             payload = {"chat_id": CHAT_ID, "caption": text, "parse_mode": "HTML"}
             files_key = 'video' if is_video else 'photo'
             
-            # TENTATIVO 1: Invio standard tramite URL
+            # TENTATIVO 1: Invio standard tramite URL nel body POST (non query string params!)
             try:
+                post_payload = dict(payload)
+                post_payload[files_key] = media_url
                 response = TELEGRAM_SESSION.post(
                     api_url + method, 
-                    data=payload, 
-                    params={files_key: media_url}, 
+                    data=post_payload, 
                     timeout=60
                 )
                 response.raise_for_status()
-                return  # Se va a buon fine, esce dalla funzione
+                return True
             except Exception as url_err:
                 print(f"⚠️ Telegram ha rifiutato l'URL diretto ({url_err}). Provo il download locale...")
                 
                 # TENTATIVO 2 (FALLBACK): Scarica il file localmente su GitHub Actions e invialo
-                # Usiamo uno User-Agent realistico per bypassare il blocco di Meta su GitHub
                 headers = {
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+                    "Accept": "*/*",
+                    "Referer": "https://www.instagram.com/",
                 }
                 media_res = requests.get(media_url, headers=headers, timeout=30)
                 media_res.raise_for_status()
@@ -858,7 +684,6 @@ def send_telegram(text, media_url=None, is_video=False):
                 file_data = BytesIO(media_res.content)
                 file_name = "story.mp4" if is_video else "story.jpg"
                 
-                # Cambia il payload: passiamo il file nel parametro 'files' invece di 'params'
                 response = TELEGRAM_SESSION.post(
                     api_url + method,
                     data=payload,
@@ -867,6 +692,7 @@ def send_telegram(text, media_url=None, is_video=False):
                 )
                 response.raise_for_status()
                 print("✅ Inviato con successo tramite download locale!")
+                return True
             
         else:
             response = TELEGRAM_SESSION.post(
@@ -875,10 +701,10 @@ def send_telegram(text, media_url=None, is_video=False):
                 timeout=30
             )
             response.raise_for_status()
+            return True
             
     except Exception as e:
         print(f"❌ Errore definitivo invio Telegram: {e}")
-        
         try:
             requests.post(
                 api_url + "sendMessage", 
@@ -891,6 +717,7 @@ def send_telegram(text, media_url=None, is_video=False):
             )
         except:
             pass
+        return False
 
 # ===============================
 # MOTORI DI SCRAPING OTTIMIZZATI
@@ -908,18 +735,18 @@ def retry_storiesviewer(page, max_retries=3):
             if links or status in ["NO_STORIES", "SERVER_UNAVAILABLE"]:
                 return links, status, error_details
             
-            # Se nessun link ma non è NO_STORIES, riprova con refresh
+            # Se nessun link ma non è NO_STORIES, riprova con reset stato pagina
             if attempt < max_retries:
                 wait_time = 3 + (attempt * 2)  # 3s, 5s, 7s...
-                print(f"  ⏳ Nessun link trovato, refresh e riprovo tra {wait_time}s...")
-                page.reload()
+                print(f"  ⏳ Nessun link trovato, reset pagina e riprovo tra {wait_time}s...")
+                reset_page_state(page)
                 time.sleep(wait_time)
                 
         except Exception as e:
             if attempt < max_retries:
                 wait_time = 3 + (attempt * 2)
                 print(f"  ⚠️ Errore, riprovo tra {wait_time}s: {str(e)[:80]}")
-                page.reload()
+                reset_page_state(page)
                 time.sleep(wait_time)
             else:
                 return [], "RETRY_FAILED", str(e)
@@ -1050,169 +877,6 @@ def check_storiesviewer(page):
         track_failure("StoriesViewer", status)
         return links, status, error_details
 
-def check_mollygram(page):
-    """Scarica storie da Mollygram.com (polling link anon-viewer)."""
-    user_masked = IG_USER[:3] + "***" if len(IG_USER) > 3 else "***"
-    
-    base_url = "https://mollygram.com/it"
-    max_retries = 2
-
-    def abort_or_retry_server_down() -> Optional[bool]:
-        """
-        Se il server è down: True = riprova, False = esci con SERVER_UNAVAILABLE.
-        None = messaggio server down non presente.
-        """
-        if not mollygram_server_unavailable(page):
-            return None
-        if attempt < max_retries - 1:
-            print("  ⚠️ Server temporarily unavailable — riprovo (tentativo successivo)...")
-            time.sleep(3)
-            return True
-        print("  🚫 Server down anche al secondo tentativo — passo ad altre sorgenti")
-        track_failure("Mollygram", "SERVER_UNAVAILABLE")
-        return False
-    
-    print(f"🦄 Controllo MOLLYGRAM (PRIORITARIO) per {user_masked}...")
-    
-    for attempt in range(max_retries):
-        print(f"\n🔄 TENTATIVO {attempt + 1}/{max_retries}...")
-        
-        links = []
-        status = "UNKNOWN"
-        start_time = time.time()
-        
-        try:
-            # 1. Navigazione con TIMEOUT DINAMICO
-            try:
-                timeout = get_adaptive_timeout("Mollygram", 30000)
-                print(f"  ⏱️ Timeout adattivo: {timeout/1000:.0f}s")
-                response = page.goto(base_url, timeout=timeout, wait_until="domcontentloaded")
-            except:
-                print("  ⚠️ Timeout caricamento pagina iniziale")
-                continue
-
-            time.sleep(2)
-            accept_cookie_banner(page)
-            try_cloudflare_turnstile(page)
-            
-            # Pulizia Banner Cookie via JavaScript (fallback se il click non basta)
-            try:
-                page.evaluate("""
-                    () => {
-                        const blockers = document.querySelectorAll('.fc-consent-root, .fc-ab-root, .fc-dialog-overlay, .fc-dialog-container, [class*="cookie"], [id*="cookie"], [class*="consent"]');
-                        blockers.forEach(el => el.remove());
-                        document.body.style.overflow = 'auto';
-                        document.documentElement.style.overflow = 'auto';
-                    }
-                """)
-            except:
-                pass
-
-            server_action = abort_or_retry_server_down()
-            if server_action is False:
-                return [], "SERVER_UNAVAILABLE", "Server temporarily unavailable"
-            if server_action is True:
-                continue
-            
-            # 2. Ricerca con CLICK
-            print(f"  🔍 Inserisco username: {user_masked}")
-            try:
-                search_input = page.wait_for_selector('input[placeholder*="Username"], input[type="text"]', timeout=10000)
-                accept_cookie_banner(page)
-                try_cloudflare_turnstile(page, wait_seconds=8)
-                search_input.click(force=True)
-                search_input.fill(IG_USER)
-                time.sleep(0.5)
-                
-                print("  🖱️  Clicco 'Vedere'...")
-                search_btn = page.wait_for_selector('button:has-text("Vedere"), button:has-text("Vedi"), [type="submit"], button[class*="search"]', timeout=5000)
-                search_btn.click()
-                
-                try:
-                    page.wait_for_load_state("networkidle", timeout=8000)
-                except Exception:
-                    pass
-
-                server_action = abort_or_retry_server_down()
-                if server_action is False:
-                    return [], "SERVER_UNAVAILABLE", "Server temporarily unavailable"
-                if server_action is True:
-                    continue
-                
-            except Exception as e:
-                print(f"  ⚠️ Errore fase input: {e}")
-                server_action = abort_or_retry_server_down()
-                if server_action is False:
-                    return [], "SERVER_UNAVAILABLE", "Server temporarily unavailable"
-                if server_action is True:
-                    continue
-                continue
-
-            wait_result, proxy_urls = wait_for_mollygram_stories(page)
-
-            if wait_result == "server_down":
-                server_action = abort_or_retry_server_down()
-                if server_action is False:
-                    return [], "SERVER_UNAVAILABLE", "Server temporarily unavailable"
-                if server_action is True:
-                    continue
-
-            if wait_result == "timeout":
-                print("  ⚠️ Timeout attesa storie (link anon-viewer non comparsi in tempo)")
-
-            if page.query_selector('text="Not found"') or page.query_selector('text="Non trovato"'):
-                print("  ⚠️ Utente non trovato su Mollygram")
-                return [], "NO_STORIES", "User not found"
-
-            print(f"  📊 Trovati {len(proxy_urls)} link proxy.")
-            
-            if len(proxy_urls) > 0:
-                seen_direct: set = set()
-                for p_url in proxy_urls:
-                    direct = decode_mollygram_url(p_url)
-                    if not direct:
-                        continue
-                    cid = get_clean_id(direct)
-                    if cid and cid in seen_direct:
-                        continue
-                    if cid:
-                        seen_direct.add(cid)
-                    links.append(direct)
-                
-                elapsed = time.time() - start_time
-                status = "SUCCESS"
-                print(f"✅ MOLLYGRAM: {len(links)} link trovati in {elapsed:.1f}s")
-                track_failure("Mollygram", status)
-                return links, status, ""
-            
-            else:
-                print("  ⚠️ 0 link trovati.")
-                server_action = abort_or_retry_server_down()
-                if server_action is False:
-                    return [], "SERVER_UNAVAILABLE", "Server temporarily unavailable"
-                if server_action is True:
-                    continue
-                if attempt < max_retries - 1:
-                    print("  🔄 Un solo retry Mollygram (caricamento lento, server ok)...")
-                    time.sleep(2)
-                else:
-                    print("  ℹ️ Mollygram esaurito → cascata su Instasave / altri siti")
-            
-        except Exception as e:
-            print(f"  ❌ Errore imprevisto: {e}")
-            if attempt < max_retries - 1:
-                time.sleep(2)
-            
-    return [], "NO_LINKS", "Nessun link trovato dopo i tentativi"
-
-def safe_check_mollygram(page):
-    """Wrapper sicuro per Mollygram"""
-    try:
-        return check_mollygram(page)
-    except Exception as e:
-        print(f"💀 Crash Mollygram wrapper: {e}")
-        return [], "FATAL_ERROR", str(e)
-
 def check_iqsaved(page):
     """Scarica storie da IQSaved.com - Versione semplificata POST-CAMBIO"""
     print(f"🔍 Controllo IQSAVED per {IG_USER}...")
@@ -1322,6 +986,17 @@ def check_instasaved(page):
         if not download_elements:
             status = "NO_LINKS"
             error_details = "Nessun link 'download-file' trovato"
+            # Diagnostica: cosa c'è nella pagina?
+            try:
+                body_text = page.inner_text("body", timeout=3000)[:300]
+                print(f"   🔎 Testo pagina (300 char): {body_text!r}")
+            except Exception:
+                pass
+            try:
+                html_len = len(page.content())
+                print(f"   🔎 Lunghezza HTML: {html_len} char")
+            except Exception:
+                pass
             print("⚠️ Instasaved: nessun link trovato")
             track_failure("Instasaved", status)
             return links, status, error_details
@@ -1443,69 +1118,6 @@ def accept_cookie_banner(page):
     return True
 
 
-def mollygram_server_unavailable(page) -> bool:
-    """True se Mollygram segnala indisponibilità temporanea del server."""
-    try:
-        if page.get_by_text(re.compile(r"temporarily unavailable", re.I)).count() > 0:
-            return True
-        if page.get_by_text(re.compile(r"server is temporarily unavailable", re.I)).count() > 0:
-            return True
-    except Exception:
-        pass
-    try:
-        body = page.inner_text("body", timeout=2000)
-    except Exception:
-        try:
-            body = page.content()
-        except Exception:
-            return False
-    low = body.lower()
-    return (
-        "server is temporarily unavailable" in low
-        or ("sorry" in low and "temporarily unavailable" in low)
-    )
-
-
-def try_cloudflare_turnstile(page, wait_seconds: float = 12) -> bool:
-    """
-    Dopo i cookie: tenta la spunta Cloudflare Turnstile se presente.
-    Non blocca a lungo se non c'è challenge.
-    """
-    deadline = time.time() + wait_seconds
-    clicked = False
-    iframe_selectors = (
-        'iframe[src*="challenges.cloudflare.com"]',
-        'iframe[src*="turnstile"]',
-        'iframe[title*="Cloudflare"]',
-        'iframe[title*="Widget"]',
-    )
-    while time.time() < deadline:
-        if mollygram_server_unavailable(page):
-            return False
-        for sel in iframe_selectors:
-            try:
-                frame = page.frame_locator(sel).first
-                for target in (
-                    'input[type="checkbox"]',
-                    '[role="checkbox"]',
-                    'label.ctp-checkbox-label',
-                    '.mark',
-                ):
-                    loc = frame.locator(target).first
-                    if loc.count() > 0:
-                        loc.click(timeout=2500)
-                        print("[mollygram] ✓ Cloudflare Turnstile: spunta cliccata")
-                        time.sleep(2)
-                        clicked = True
-                        break
-            except Exception:
-                continue
-            if clicked:
-                break
-        if clicked:
-            break
-        time.sleep(0.8)
-    return clicked
 
 
 def check_instasave(page, nomi_gia_inviati=None):
@@ -1534,8 +1146,8 @@ def check_instasave(page, nomi_gia_inviati=None):
         timeout = get_adaptive_timeout("Instasave", 25000)
         print(f"  ⏱️ Timeout adattivo: {timeout/1000:.0f}s")
         
-        page.goto(url, wait_until="networkidle", timeout=max(timeout, 60000))
-        time.sleep(1)
+        page.goto(url, wait_until="domcontentloaded", timeout=max(timeout, 60000))
+        time.sleep(3)
 
         # Gestione cookie e rimozione overlay bloccanti
         accept_cookie_banner(page)
@@ -1547,7 +1159,7 @@ def check_instasave(page, nomi_gia_inviati=None):
             story_link = page.get_by_role("link", name=re.compile(r"story downloader", re.I)).first
             if story_link.count() > 0:
                 story_link.click()
-                page.wait_for_load_state("networkidle")
+                page.wait_for_load_state("domcontentloaded")
                 time.sleep(1)
                 accept_cookie_banner(page)
 
@@ -1598,6 +1210,20 @@ def check_instasave(page, nomi_gia_inviati=None):
         print(f"[instasave] Trovati {count} link totali")
 
         if count == 0:
+            # Diagnostica: dump della pagina per capire cosa è cambiato
+            try:
+                debug_html = "debug_instasave_no_links.html"
+                with open(debug_html, "w", encoding="utf-8") as f:
+                    f.write(page.content())
+                print(f"[instasave] 🔎 HTML salvato in {debug_html} ({len(page.content())} char)")
+                try:
+                    body_text = page.inner_text("body", timeout=3000)[:500]
+                    print(f"[instasave] 🔎 Body text (500 char): {body_text!r}")
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"[instasave] ⚠️ Dump HTML fallito: {e}")
+            
             status = "NO_LINKS"
             error_details = "Nessun link CDN trovato"
             print("[instasave] ✗ Nessun link trovato")
@@ -1736,32 +1362,6 @@ def emergency_cleanup(browser=None, context=None):
     gc.collect()
 
 # ===============================
-# CODICE PER CREARE FILE DEBUG
-# ===============================
-
-def crea_file_debug():
-    """Crea file di debug vuoti per GitHub Actions"""
-    debug_files = [
-        "debug.html",
-        "debug.png",
-        "iqsaved_debug.html",
-        "playwright_logs.txt"
-    ]
-    
-    for file in debug_files:
-        try:
-            with open(file, "w", encoding="utf-8") as f:
-                if file.endswith(".txt"):
-                    f.write(f"Debug file creato il: {datetime.now()}\n")
-                    f.write("Il bot non ha creato file debug reali.\n")
-                elif file.endswith(".html"):
-                    f.write(f"<!-- Debug HTML creato il {datetime.now()} -->\n")
-                    f.write("<html><body><h1>Debug placeholder</h1></body></html>")
-            print(f"✅ Creato file debug placeholder: {file}")
-        except:
-            print(f"⚠️ Non ho potuto creare: {file}")
-
-# ===============================
 # FUNZIONE PRINCIPALE OTTIMIZZATA
 # ===============================
 
@@ -1779,9 +1379,17 @@ def run():
     print("TELEGRAM_TOKEN impostato:", "SI" if TOKEN else "NO")
     print("CHAT_ID impostato:", "SI" if CHAT_ID else "NO")
 
-    
+    # Preflight DNS: diagnostica rapida connettività
+    dns_results = preflight_dns_check()
+    if not dns_results.get("api.telegram.org"):
+        print("❌ Telegram irraggiungibile via DNS. Il bot non può notificare nulla.")
+        log_semplice("❌ DNS: api.telegram.org non risolvibile")
+
+    unreachable = [d for d, ok in dns_results.items() if not ok and d != "api.telegram.org"]
+    if unreachable:
+        log_semplice(f"⚠️ DNS: {len(unreachable)} siti non risolvibili: {', '.join(unreachable)}")
+
     # Continua con il codice esistente...
-    crea_file_debug()
     cleanup_old_logs(7)
 
     # Backup automatico history
@@ -1823,7 +1431,6 @@ def run():
             with open("history.txt", "r", encoding="utf-8") as f:
                 seen_ids = [line.strip() for line in f if line.strip()]
         
-        updated_history = seen_ids.copy()
         ids_to_add = []
         
         phase_timers["setup"] = time.time() - phase_start
@@ -1845,13 +1452,15 @@ def run():
                     '--disable-default-apps',
                     '--mute-audio',
                     '--no-first-run',
-                    '--single-process',
-                    '--max_old_space_size=256',
                     '--disable-features=site-per-process,TranslateUI',
                     '--disable-blink-features=AutomationControlled',
                     '--disable-background-timer-throttling',
                     '--disable-renderer-backgrounding',
                     '--disable-backgrounding-occluded-windows',
+                    # DNS-over-HTTPS per bypassare resolver locali filtrati
+                    '--enable-features=DnsOverHttps',
+                    '--dns-over-https-mode=secure',
+                    '--dns-over-https-templates=https://cloudflare-dns.com/dns-query',
                 ]
             )
             
@@ -1876,89 +1485,67 @@ def run():
             
             page = context.new_page()
             
-            # Applica stealth per mascherare il bot (riduce blocchi anti-bot)
-            # playwright-stealth 2.0+ applica a tutto il context
-            if STEALTH_AVAILABLE and STEALTH_INSTANCE:
-                try:
-                    STEALTH_INSTANCE.apply_stealth_sync(context)
-                    print("🎭 Playwright-stealth 2.0 attivato")
-                except Exception as e:
-                    print(f"⚠️ Stealth non applicato: {e}")
+
             
             # ==========================================
-            # ORDINE: MOLLYGRAM -> INSTASAVE -> IQSAVED -> STORIESVIEWER -> INSTASAVED
+            # ORDINE: STORIESVIEWER -> INSTASAVE -> IQSAVED -> INSTASAVED
             # Cascata: si fermano le sorgenti successive se una precedente ha già storie.
             # ==========================================
             
-            links_molly, molly_status, molly_error = [], "NOT_TESTED", ""
             files_instasave, instasave_status, instasave_error = [], "NOT_TESTED", ""
             links_iq, iqsaved_status, iqsaved_error = [], "NOT_TESTED", ""
             links_viewer, storiesviewer_status, storiesviewer_error = [], "NOT_TESTED", ""
             links_insta, insta_status, insta_error = [], "NOT_TESTED", ""
             
-            print("\n=== FASE 0: MOLLYGRAM (PRIORITARIO) ===")
+            print("\n=== FASE 1: STORIESVIEWER ===")
             try:
-                links_molly, molly_status, molly_error = retry_with_backoff(
-                    safe_check_mollygram, max_retries=1, page=page
+                links_viewer, storiesviewer_status, storiesviewer_error = retry_with_backoff(
+                    safe_check_storiesviewer, max_retries=2, page=page
                 )
             except Exception as e:
-                print(f"Errore chiamata Mollygram: {e}")
-                molly_status = "CRASH"
+                print(f"Errore StoriesViewer: {e}")
+                storiesviewer_status = "CRASH"
             
-            if links_molly:
-                print("⚡ Mollygram ha storie: salto Instasave, IQSaved, StoriesViewer e Instasaved")
-                instasave_status = iqsaved_status = storiesviewer_status = insta_status = "SKIPPED_SUCCESS"
+            if links_viewer:
+                print("⚡ StoriesViewer ha link: salto Instasave, IQSaved e Instasaved")
+                instasave_status = iqsaved_status = insta_status = "SKIPPED_SUCCESS"
             else:
-                print("\n=== FASE 1: INSTASAVE.WEBSITE ===")
+                print("\n=== FASE 2: INSTASAVE.WEBSITE ===")
                 try:
                     files_instasave, instasave_status, instasave_error = retry_with_backoff(
-                        safe_check_instasave, max_retries=1, page=page, nomi_gia_inviati=seen_ids
+                        safe_check_instasave, max_retries=2, page=page, nomi_gia_inviati=seen_ids
                     )
                 except Exception as e:
                     print(f"Errore chiamata Instasave: {e}")
                     instasave_status = "CRASH"
                 
                 if files_instasave:
-                    print("⚡ Instasave ha nuovi file: salto IQSaved, StoriesViewer e Instasaved")
-                    iqsaved_status = storiesviewer_status = insta_status = "SKIPPED_SUCCESS"
+                    print("⚡ Instasave ha nuovi file: salto IQSaved e Instasaved")
+                    iqsaved_status = insta_status = "SKIPPED_SUCCESS"
                 else:
-                    print("\n=== FASE 2: IQSAVED ===")
+                    print("\n=== FASE 3: IQSAVED ===")
                     try:
                         links_iq, iqsaved_status, iqsaved_error = retry_with_backoff(
-                            safe_check_iqsaved, max_retries=1, page=page
+                            safe_check_iqsaved, max_retries=2, page=page
                         )
                     except Exception as e:
                         print(f"Errore chiamata IQSaved: {e}")
                         iqsaved_status = "CRASH"
                     
                     if links_iq:
-                        print("⚡ IQSaved ha link: salto StoriesViewer e Instasaved")
-                        storiesviewer_status = insta_status = "SKIPPED_SUCCESS"
+                        print("⚡ IQSaved ha link: salto Instasaved")
+                        insta_status = "SKIPPED_SUCCESS"
                     else:
-                        print("\n=== FASE 3: STORIESVIEWER ===")
+                        print("\n=== FASE 4: INSTASAVED ===")
                         try:
-                            links_viewer, storiesviewer_status, storiesviewer_error = retry_with_backoff(
-                                safe_check_storiesviewer, max_retries=1, page=page
+                            links_insta, insta_status, insta_error = retry_with_backoff(
+                                safe_check_instasaved, max_retries=2, page=page
                             )
                         except Exception as e:
-                            print(f"Errore StoriesViewer: {e}")
-                            storiesviewer_status = "CRASH"
-                        
-                        if links_viewer:
-                            print("⚡ StoriesViewer ha link: salto Instasaved")
-                            insta_status = "SKIPPED_SUCCESS"
-                        else:
-                            print("\n=== FASE 4: INSTASAVED ===")
-                            try:
-                                links_insta, insta_status, insta_error = retry_with_backoff(
-                                    safe_check_instasaved, max_retries=1, page=page
-                                )
-                            except Exception as e:
-                                print(f"Errore Instasaved: {e}")
-                                insta_status = "CRASH"
+                            print(f"Errore Instasaved: {e}")
+                            insta_status = "CRASH"
             
             merged_raw = merge_stories_preserve_order(
-                links_molly,
                 links_iq,
                 links_viewer,
                 links_insta,
@@ -1969,10 +1556,10 @@ def run():
             
             print(
                 f"📊 Storie unite: {len(merged_raw)} "
-                f"(Molly: {len(links_molly)}, Instasave file: {len(files_instasave)}, "
+                f"(Instasave file: {len(files_instasave)}, "
                 f"IQ: {len(links_iq)}, Viewer: {len(links_viewer)}, Insta: {len(links_insta)})"
             )
-            all_links = url_candidates + local_files
+
             
             # Chiudi browser ASAP
             try:
@@ -2056,14 +1643,17 @@ def run():
                     or (".mp4" in url.lower() and url.startswith(("http://", "https://")))
                     or "video" in url.lower()
                 )
-                tipo = "VIDEO" if is_video else "FOTO"
                 
                 dida = f"Storia {i+1}/{num_nuove}"
                 
                 try:
-                    send_telegram(dida, url, is_video)
-                    ids_to_add.append(clean_id)
-                    consecutive_success += 1
+                    success = send_telegram(dida, url, is_video)
+                    if success:
+                        ids_to_add.append(clean_id)
+                        consecutive_success += 1
+                    else:
+                        print(f"⚠️ Invio storia {i+1} ({clean_id}) non riuscito: NON aggiunta a history.txt (verrà riprovata)")
+                        consecutive_success = 0
                     
                     # Rate limiting adattivo: se tutto va bene, accelera leggermente
                     if i < len(storie_da_processare) - 1:
@@ -2109,12 +1699,11 @@ def run():
         # Definiamo chi ha funzionato davvero
         # Usa variabili difensive per evitare NameError se qualcosa è andato storto prima
         instasave_ok = (locals().get('instasave_status') == "SUCCESS") and (len(locals().get('files_instasave', [])) > 0)
-        molly_ok = (locals().get('molly_status') == "SUCCESS") and (len(locals().get('links_molly', [])) > 0)
         viewer_ok = (locals().get('storiesviewer_status') == "SUCCESS") and (len(locals().get('links_viewer', [])) > 0)
         insta_ok = (locals().get('insta_status') == "SUCCESS") and (len(locals().get('links_insta', [])) > 0)
         iq_ok = (locals().get('iqsaved_status') == "SUCCESS") and (len(locals().get('links_iq', [])) > 0)
         
-        any_success = instasave_ok or molly_ok or viewer_ok or insta_ok or iq_ok
+        any_success = instasave_ok or viewer_ok or insta_ok or iq_ok
         
         # --- CONTROLLO SINGOLI SITI ---
         
@@ -2127,11 +1716,6 @@ def run():
         iq_status = locals().get('iqsaved_status', 'UNKNOWN')
         if iq_status in ["HTTP_ERROR", "CRASH", "TIMEOUT"]:
             alert_message += f"⚠️ IQSaved issue: {iq_status}\n"
-        
-        # Se Mollygram è stato testato (non skippato) e ha fallito
-        m_status = locals().get('molly_status', 'UNKNOWN')
-        if m_status not in ["NOT_TESTED", "SKIPPED_SUCCESS", "SUCCESS", "NO_LINKS"]:
-             alert_message += f"⚠️ Mollygram issue: {m_status}\n"
         
         # Se Instasaved è stato testato e ha fallito
         i_status = locals().get('insta_status', 'UNKNOWN')
@@ -2152,22 +1736,29 @@ def run():
             all_no_links = (
                 (is_status in ["NO_LINKS", "NOT_TESTED"]) and
                 (iq_status in ["NO_LINKS", "NOT_TESTED"]) and
-                (m_status in ["NO_LINKS", "NOT_TESTED", "SKIPPED_SUCCESS"]) and
                 (v_status in ["NO_LINKS", "NOT_TESTED", "SKIPPED_SUCCESS"]) and
                 (i_status in ["NO_LINKS", "NOT_TESTED", "SKIPPED_SUCCESS"])
             )
             
             if not all_no_links:
                 print("🚨 ALLARME CRITICO: Tutti i motori hanno fallito!")
+                
+                # Euristica: se tutti sono CRASH/FATAL_ERROR, probabile problema di rete
+                network_like = all(
+                    s in ["CRASH", "FATAL_ERROR", "HTTP_ERROR", "TIMEOUT"]
+                    for s in [is_status, iq_status, v_status, i_status]
+                )
+                prefix = "🌐 Possibile problema di rete/DNS.\n\n" if network_like else ""
+                
                 critical_alert = (
+                    f"{prefix}"
                     f"🔴 CRITICO: Nessun sito è riuscito a scaricare le storie!\n\n"
                     f"📊 STATO:\n"
-                    f"0. Instasave: {is_status}\n"
-                    f"1. IQSaved: {iq_status}\n"
-                    f"2. Mollygram: {m_status}\n"
+                    f"1. Instasave: {is_status}\n"
+                    f"2. IQSaved: {iq_status}\n"
                     f"3. StoriesViewer: {v_status}\n"
                     f"4. Instasaved: {i_status}\n\n"
-                    f"Intervento richiesto su {user_masked}!"
+                    f"Intervento richiesto su {IG_USER}!"
                 )
                 send_telegram(critical_alert)
             else:
@@ -2180,36 +1771,8 @@ def run():
         print(f"\n📋 Riepilogo Status:")
         print(f"   Instasave:     {is_status}")
         print(f"   IQSaved:       {iq_status}")
-        print(f"   Mollygram:     {m_status}")
         print(f"   StoriesViewer: {v_status}")
         print(f"   Instasaved:    {i_status}")
-        
-        # ANALISI PERFORMANCE
-        total_time = time.time() - start_total
-        print(f"\n⏱️ ANALISI PERFORMANCE:")
-        print(f"  Totale: {total_time:.1f}s")
-        
-        if total_time > 90:
-            print(f"⚠️ AVVISO: Bot lento ({total_time:.1f}s)")
-            
-        print(f"\n✅ BOT COMPLETATO")
-        log_semplice(f"✅ Bot completato: {num_nuove} nuove su {len(tutti_i_link)}")
-        
-    except Exception as e:
-        log_semplice(f"💀 ERRORE GRAVE: {str(e)[:100]}")
-        print(f"💀 ERRORE FATALE nel run(): {e}")
-        emergency_cleanup(browser, context)
-        
-        try:
-            send_telegram(
-                f"💀 ERRORE FATALE BOT\n\n"
-                f"Errore: {str(e)[:200]}\n"
-                f"Time: {datetime.now().strftime('%H:%M:%S')}"
-            )
-        except:
-            pass
-        
-        raise
         
         # ANALISI PERFORMANCE
         total_time = time.time() - start_total
@@ -2240,7 +1803,6 @@ def run():
         log_semplice(f"💀 ERRORE GRAVE: {str(e)[:100]}")
         print(f"💀 ERRORE FATALE nel run(): {e}")
         emergency_cleanup(browser, context)
-        
         try:
             send_telegram(
                 f"💀 ERRORE FATALE BOT\n\n"
@@ -2250,7 +1812,6 @@ def run():
             )
         except:
             pass
-        
         raise
 
 # ===============================
